@@ -18,11 +18,11 @@ const STATUS_LABELS: Record<Timecard["status"], string> = {
 };
 
 const STATUS_COLORS: Record<Timecard["status"], string> = {
-  draft: "bg-gray-100 text-gray-700",
-  submitted: "bg-blue-100 text-blue-700",
-  approved: "bg-green-100 text-green-700",
-  rejected: "bg-red-100 text-red-700",
-  sent_to_payroll: "bg-purple-100 text-purple-700",
+  draft: "bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300",
+  submitted: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
+  approved: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
+  rejected: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
+  sent_to_payroll: "bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300",
 };
 
 function formatDate(iso: string) {
@@ -154,7 +154,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <span className="text-gray-400">Loading timecard…</span>
+        <span className="text-gray-400 dark:text-gray-500">Loading timecard…</span>
       </div>
     );
   }
@@ -186,8 +186,8 @@ export default function DashboardPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">My Timecard</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">My Timecard</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
             Pay period: {formatDate(pay_period.start_date)} –{" "}
             {formatDate(pay_period.end_date)}
           </p>
@@ -198,7 +198,7 @@ export default function DashboardPage() {
           >
             {STATUS_LABELS[timecard.status]}
           </span>
-          <span className="text-sm text-gray-600">
+          <span className="text-sm text-gray-600 dark:text-gray-400">
             Total: <strong>{totalHours.toFixed(2)} hrs</strong>
           </span>
         </div>
@@ -206,21 +206,21 @@ export default function DashboardPage() {
 
       {/* Rejection note */}
       {timecard.status === "rejected" && timecard.rejection_note && (
-        <div className="mb-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+        <div className="mb-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-4 py-3 text-sm text-red-700 dark:text-red-300">
           <strong>Rejection reason:</strong> {timecard.rejection_note}
         </div>
       )}
 
       {/* Time entry table */}
-      <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-gray-200 bg-gray-50 text-left">
-              <th className="px-4 py-3 font-medium text-gray-600 w-36">Date</th>
-              <th className="px-4 py-3 font-medium text-gray-600 w-32">Clock In</th>
-              <th className="px-4 py-3 font-medium text-gray-600 w-32">Clock Out</th>
-              <th className="px-4 py-3 font-medium text-gray-600 w-20">Hours</th>
-              <th className="px-4 py-3 font-medium text-gray-600">Notes</th>
+            <tr className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-left">
+              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-36">Date</th>
+              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-32">Clock In</th>
+              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-32">Clock Out</th>
+              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-20">Hours</th>
+              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400">Notes</th>
             </tr>
           </thead>
           <tbody>
@@ -233,9 +233,9 @@ export default function DashboardPage() {
               return (
                 <tr
                   key={day}
-                  className={`border-b border-gray-100 last:border-0 ${isWeekend ? "bg-gray-50/60" : ""}`}
+                  className={`border-b border-gray-100 dark:border-gray-700/50 last:border-0 ${isWeekend ? "bg-gray-50/60 dark:bg-gray-800/40" : ""}`}
                 >
-                  <td className="px-4 py-2 text-gray-700 whitespace-nowrap">
+                  <td className="px-4 py-2 text-gray-700 dark:text-gray-300 whitespace-nowrap">
                     {formatDate(day)}
                   </td>
                   <td className="px-4 py-2">
@@ -245,10 +245,10 @@ export default function DashboardPage() {
                         value={entry.clock_in}
                         onChange={(e) => handleEntryChange(day, "clock_in", e.target.value)}
                         onBlur={() => handleBlur(day)}
-                        className="w-full rounded border border-gray-200 px-2 py-1 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                        className="w-full rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 dark:text-gray-100 px-2 py-1 text-sm focus:border-indigo-400 dark:focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
                       />
                     ) : (
-                      <span className="text-gray-600">{entry.clock_in || "—"}</span>
+                      <span className="text-gray-600 dark:text-gray-400">{entry.clock_in || "—"}</span>
                     )}
                   </td>
                   <td className="px-4 py-2">
@@ -258,13 +258,13 @@ export default function DashboardPage() {
                         value={entry.clock_out}
                         onChange={(e) => handleEntryChange(day, "clock_out", e.target.value)}
                         onBlur={() => handleBlur(day)}
-                        className="w-full rounded border border-gray-200 px-2 py-1 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                        className="w-full rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 dark:text-gray-100 px-2 py-1 text-sm focus:border-indigo-400 dark:focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
                       />
                     ) : (
-                      <span className="text-gray-600">{entry.clock_out || "—"}</span>
+                      <span className="text-gray-600 dark:text-gray-400">{entry.clock_out || "—"}</span>
                     )}
                   </td>
-                  <td className="px-4 py-2 text-gray-700">
+                  <td className="px-4 py-2 text-gray-700 dark:text-gray-300">
                     {hours !== null ? hours.toFixed(2) : "—"}
                   </td>
                   <td className="px-4 py-2">
@@ -275,10 +275,10 @@ export default function DashboardPage() {
                         value={entry.notes}
                         onChange={(e) => handleEntryChange(day, "notes", e.target.value)}
                         onBlur={() => handleBlur(day)}
-                        className="w-full rounded border border-gray-200 px-2 py-1 text-sm focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                        className="w-full rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 dark:text-gray-100 px-2 py-1 text-sm focus:border-indigo-400 dark:focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
                       />
                     ) : (
-                      <span className="text-gray-500 text-xs">{entry.notes || ""}</span>
+                      <span className="text-gray-500 dark:text-gray-400 text-xs">{entry.notes || ""}</span>
                     )}
                   </td>
                 </tr>
@@ -298,7 +298,7 @@ export default function DashboardPage() {
           >
             {submitting ? "Submitting…" : "Submit Timecard"}
           </button>
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-gray-500 dark:text-gray-400">
             {completedEntries.length} of {days.length} days have complete entries. Changes
             auto-save.
           </p>
