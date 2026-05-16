@@ -1,6 +1,5 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
-import { SupabaseAdapter } from "@auth/supabase-adapter";
 import { supabaseAdmin } from "@/lib/supabase";
 import type { NextAuthConfig } from "next-auth";
 
@@ -18,14 +17,6 @@ declare module "next-auth" {
 
 const config: NextAuthConfig = {
   providers: [Google],
-  // Only initialize the adapter when env vars are present (build-time safety)
-  adapter:
-    process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
-      ? SupabaseAdapter({
-          url: process.env.NEXT_PUBLIC_SUPABASE_URL,
-          secret: process.env.SUPABASE_SERVICE_ROLE_KEY,
-        })
-      : undefined,
   session: { strategy: "jwt" },
   callbacks: {
     async signIn({ user }) {
