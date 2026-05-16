@@ -1,15 +1,29 @@
 export const dynamic = "force-dynamic";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getCurrentPayPeriod } from "@/lib/pay-periods";
+import { getPayPeriodForWeek, parseWeekParam } from "@/lib/pay-periods";
 import type { TimeEntry } from "@/types";
 
-/** POST /api/timecard/submit — submit the current timecard for approval */
-export async function POST() {
+/** POST /api/timecard/submit — submit a weekly timecard for approval */
+export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  let body: { week?: string } = {};
+  try {
+    body = await req.json();
+  } catch {
+    // body is optional; defaults to current week
+  }
+
+  let weekStart;
+  try {
+    weekStart = parseWeekParam(body.week);
+  } catch {
+    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
   }
 
   const { data: user } = await supabaseAdmin
@@ -22,7 +36,7 @@ export async function POST() {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  const payPeriod = await getCurrentPayPeriod(supabaseAdmin);
+  const payPeriod = await getPayPeriodForWeek(supabaseAdmin, weekStart);
 
   const { data: timecard } = await supabaseAdmin
     .from("timecards")
@@ -42,7 +56,6 @@ export async function POST() {
     );
   }
 
-  // Validate: all entries must have both clock_in and clock_out
   const { data: entries } = await supabaseAdmin
     .from("time_entries")
     .select("*")

@@ -1,59 +1,69 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PayPeriod } from "@/types";
 
-/** Anchor date: the start of the first bi-weekly period (a Sunday) */
-const ANCHOR_DATE = new Date("2025-01-05T00:00:00.000Z");
-const TWO_WEEKS_MS = 14 * 24 * 60 * 60 * 1000;
-
-/**
- * Given any date, returns the start and end dates of the bi-weekly pay period
- * it falls in, anchored to 2025-01-05.
- */
-export function generateBiweeklyPeriod(referenceDate: Date): {
-  start_date: string;
-  end_date: string;
-} {
-  const refMs = referenceDate.getTime();
-  const anchorMs = ANCHOR_DATE.getTime();
-  const diff = refMs - anchorMs;
-  const periodIndex = Math.floor(diff / TWO_WEEKS_MS);
-
-  const startMs = anchorMs + periodIndex * TWO_WEEKS_MS;
-  const endMs = startMs + TWO_WEEKS_MS - 1;
-
-  return {
-    start_date: toISODate(new Date(startMs)),
-    end_date: toISODate(new Date(endMs)),
-  };
-}
-
 function toISODate(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
 /**
- * Fetches the current open pay period from DB.
- * Creates one if none exists.
+ * Returns the most recent Sunday (start of week) for any given date.
+ * Time is zeroed out to midnight.
  */
-export async function getCurrentPayPeriod(
-  supabase: SupabaseClient
-): Promise<PayPeriod> {
-  const today = new Date();
-  const { start_date, end_date } = generateBiweeklyPeriod(today);
+export function getWeekStart(date: Date): Date {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - d.getDay()); // getDay() === 0 on Sunday, so Sunday stays
+  return d;
+}
 
-  // Look for an existing open period that covers today
+/**
+ * Returns the Sunday–Saturday date range for the week containing referenceDate.
+ */
+export function generateWeeklyPeriod(referenceDate: Date): {
+  start_date: string;
+  end_date: string;
+} {
+  const start = getWeekStart(referenceDate);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6); // Saturday
+  return {
+    start_date: toISODate(start),
+    end_date: toISODate(end),
+  };
+}
+
+/**
+ * Parses an optional week query/body param into a week-start Date.
+ * Falls back to the current week if the param is absent.
+ * Throws with a descriptive message if the value is an invalid date string.
+ */
+export function parseWeekParam(weekStr: string | null | undefined): Date {
+  if (!weekStr) return getWeekStart(new Date());
+  const parsed = new Date(weekStr + "T00:00:00");
+  if (isNaN(parsed.getTime())) throw new Error("Invalid week parameter");
+  return getWeekStart(parsed);
+}
+
+/**
+ * Fetches the pay period matching the exact Sunday–Saturday window of weekStart.
+ * Creates a new open pay period if none exists for that week.
+ */
+export async function getPayPeriodForWeek(
+  supabase: SupabaseClient,
+  weekStart: Date
+): Promise<PayPeriod> {
+  const { start_date, end_date } = generateWeeklyPeriod(weekStart);
+
   const { data: existing, error } = await supabase
     .from("pay_periods")
     .select("*")
-    .eq("status", "open")
-    .lte("start_date", toISODate(today))
-    .gte("end_date", toISODate(today))
+    .eq("start_date", start_date)
+    .eq("end_date", end_date)
     .maybeSingle();
 
   if (error) throw new Error(`Failed to fetch pay period: ${error.message}`);
   if (existing) return existing as PayPeriod;
 
-  // Create the period for the current bi-weekly window
   const { data: created, error: createError } = await supabase
     .from("pay_periods")
     .insert({ start_date, end_date, status: "open" })
@@ -66,10 +76,14 @@ export async function getCurrentPayPeriod(
   return created as PayPeriod;
 }
 
-/**
- * Ensures a pay period exists for the current date.
- * Safe to call on every login/app start.
- */
+/** Fetches (or creates) the pay period for the current week. */
+export async function getCurrentPayPeriod(
+  supabase: SupabaseClient
+): Promise<PayPeriod> {
+  return getPayPeriodForWeek(supabase, new Date());
+}
+
+/** Ensures a pay period exists for the current week. Safe to call on app start. */
 export async function ensurePayPeriodExists(
   supabase: SupabaseClient
 ): Promise<PayPeriod> {

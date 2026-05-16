@@ -2,17 +2,23 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getCurrentPayPeriod } from "@/lib/pay-periods";
+import { getPayPeriodForWeek, parseWeekParam } from "@/lib/pay-periods";
 import type { Timecard, TimeEntry } from "@/types";
 
-/** GET /api/timecard — fetch (or create) the current timecard + entries */
-export async function GET() {
+/** GET /api/timecard?week=YYYY-MM-DD — fetch (or create) the timecard + entries for a given week */
+export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Look up user row
+  let weekStart;
+  try {
+    weekStart = parseWeekParam(req.nextUrl.searchParams.get("week"));
+  } catch {
+    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
+  }
+
   const { data: user, error: userError } = await supabaseAdmin
     .from("users")
     .select("id")
@@ -23,7 +29,7 @@ export async function GET() {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  const payPeriod = await getCurrentPayPeriod(supabaseAdmin);
+  const payPeriod = await getPayPeriodForWeek(supabaseAdmin, weekStart);
 
   // Upsert timecard (creates draft if not yet present)
   const { data: timecard, error: tcError } = await supabaseAdmin
@@ -54,7 +60,6 @@ export async function GET() {
     );
   }
 
-  // Fetch entries
   const { data: entries } = await supabaseAdmin
     .from("time_entries")
     .select("*")
@@ -76,6 +81,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = (await req.json()) as {
+    week?: string;
     work_date: string;
     clock_in?: string;
     clock_out?: string;
@@ -84,6 +90,13 @@ export async function POST(req: NextRequest) {
 
   if (!body.work_date) {
     return NextResponse.json({ error: "work_date is required" }, { status: 400 });
+  }
+
+  let weekStart;
+  try {
+    weekStart = parseWeekParam(body.week);
+  } catch {
+    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
   }
 
   const { data: user } = await supabaseAdmin
@@ -96,7 +109,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  const payPeriod = await getCurrentPayPeriod(supabaseAdmin);
+  const payPeriod = await getPayPeriodForWeek(supabaseAdmin, weekStart);
 
   const { data: timecard } = await supabaseAdmin
     .from("timecards")
@@ -109,7 +122,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Timecard not found" }, { status: 404 });
   }
 
-  // Only allow edits on draft or rejected timecards
   if (!["draft", "rejected"].includes(timecard.status)) {
     return NextResponse.json(
       { error: "Timecard is not editable in its current state" },

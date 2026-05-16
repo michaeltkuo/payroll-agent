@@ -9,7 +9,7 @@ create table if not exists users (
   created_at timestamptz default now()
 );
 
--- Pay periods (bi-weekly)
+-- Pay periods (weekly, Sun–Sat)
 create table if not exists pay_periods (
   id uuid primary key default gen_random_uuid(),
   start_date date not null,

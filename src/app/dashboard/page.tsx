@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import type { Timecard, TimeEntry, PayPeriod } from "@/types";
+import { getWeekStart } from "@/lib/pay-periods";
 
 interface DashboardData {
   timecard: Timecard;
@@ -33,6 +34,13 @@ function formatDate(iso: string) {
   });
 }
 
+function formatWeekLabel(iso: string) {
+  return new Date(iso + "T00:00:00").toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 function calcHours(clockIn: string, clockOut: string): number | null {
   if (!clockIn || !clockOut) return null;
   const [ih, im] = clockIn.split(":").map(Number);
@@ -53,23 +61,29 @@ function getDaysInPeriod(start: string, end: string): string[] {
 }
 
 export default function DashboardPage() {
+  const [weekOffset, setWeekOffset] = useState(0); // 0 = current week, -1 = last week, etc.
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  // Local editable state: work_date → { clock_in, clock_out, notes }
   const [localEntries, setLocalEntries] = useState<
     Record<string, { clock_in: string; clock_out: string; notes: string }>
   >({});
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  const load = useCallback(async () => {
+  // Compute the ISO date string for the Sunday of the displayed week
+  const weekStartStr = useMemo(() => {
+    const base = getWeekStart(new Date());
+    base.setDate(base.getDate() + weekOffset * 7);
+    return base.toISOString().slice(0, 10);
+  }, [weekOffset]);
+
+  const load = useCallback(async (week: string) => {
     setLoading(true);
-    const res = await fetch("/api/timecard");
+    const res = await fetch(`/api/timecard?week=${week}`);
     if (res.ok) {
       const json = (await res.json()) as DashboardData;
       setData(json);
-      // Populate local entries from existing DB data
       const map: Record<string, { clock_in: string; clock_out: string; notes: string }> = {};
       for (const e of json.entries) {
         map[e.work_date] = {
@@ -84,11 +98,20 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    load(weekStartStr);
+  }, [weekOffset, load]); // weekOffset drives weekStartStr; weekOffset change → reload
+
+  const navigateWeek = (direction: -1 | 1) => {
+    // Flush and clear any pending autosaves before switching weeks
+    Object.values(saveTimers.current).forEach(clearTimeout);
+    saveTimers.current = {};
+    setLocalEntries({});
+    setWeekOffset((prev) => prev + direction);
+  };
 
   const isEditable =
-    data?.timecard.status === "draft" || data?.timecard.status === "rejected";
+    (data?.timecard.status === "draft" || data?.timecard.status === "rejected") &&
+    data?.pay_period.status === "open";
 
   const saveEntry = useCallback(
     async (workDate: string, values: { clock_in: string; clock_out: string; notes: string }) => {
@@ -96,6 +119,7 @@ export default function DashboardPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          week: weekStartStr,
           work_date: workDate,
           clock_in: values.clock_in || null,
           clock_out: values.clock_out || null,
@@ -103,7 +127,7 @@ export default function DashboardPage() {
         }),
       });
     },
-    []
+    [weekStartStr]
   );
 
   const handleEntryChange = (
@@ -118,7 +142,6 @@ export default function DashboardPage() {
       };
       const newState = { ...prev, [workDate]: updated };
 
-      // Debounce: save 800ms after last change
       if (saveTimers.current[workDate]) clearTimeout(saveTimers.current[workDate]);
       saveTimers.current[workDate] = setTimeout(() => {
         saveEntry(workDate, updated);
@@ -129,7 +152,6 @@ export default function DashboardPage() {
   };
 
   const handleBlur = (workDate: string) => {
-    // Flush on blur
     if (saveTimers.current[workDate]) {
       clearTimeout(saveTimers.current[workDate]);
       delete saveTimers.current[workDate];
@@ -141,9 +163,13 @@ export default function DashboardPage() {
   const handleSubmit = async () => {
     setSubmitting(true);
     setSubmitError(null);
-    const res = await fetch("/api/timecard/submit", { method: "POST" });
+    const res = await fetch("/api/timecard/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ week: weekStartStr }),
+    });
     if (res.ok) {
-      await load();
+      await load(weekStartStr);
     } else {
       const json = (await res.json()) as { error?: string };
       setSubmitError(json.error ?? "Failed to submit");
@@ -187,10 +213,32 @@ export default function DashboardPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">My Timecard</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
-            Pay period: {formatDate(pay_period.start_date)} –{" "}
-            {formatDate(pay_period.end_date)}
-          </p>
+          {/* Week navigator */}
+          <div className="flex items-center gap-1 mt-1">
+            <button
+              onClick={() => navigateWeek(-1)}
+              className="rounded p-1 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition-colors"
+              aria-label="Previous week"
+            >
+              ←
+            </button>
+            <p className="text-sm text-gray-500 dark:text-gray-400 px-1 min-w-[200px] text-center">
+              {weekOffset === 0 && (
+                <span className="font-medium text-indigo-600 dark:text-indigo-400 mr-1">
+                  This week ·
+                </span>
+              )}
+              {formatWeekLabel(pay_period.start_date)} – {formatWeekLabel(pay_period.end_date)}
+            </p>
+            <button
+              onClick={() => navigateWeek(1)}
+              disabled={weekOffset === 0}
+              className="rounded p-1 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              aria-label="Next week"
+            >
+              →
+            </button>
+          </div>
         </div>
         <div className="flex items-center gap-3">
           <span
