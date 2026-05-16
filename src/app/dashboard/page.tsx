@@ -222,7 +222,10 @@ export default function DashboardPage() {
             >
               ←
             </button>
-            <p className="text-sm text-gray-500 dark:text-gray-400 px-1 min-w-[200px] text-center">
+            <p
+              data-testid="week-nav-label"
+              className="text-sm text-gray-500 dark:text-gray-400 px-1 min-w-[200px] text-center"
+            >
               {weekOffset === 0 && (
                 <span className="font-medium text-indigo-600 dark:text-indigo-400 mr-1">
                   This week ·
@@ -254,7 +257,10 @@ export default function DashboardPage() {
 
       {/* Rejection note */}
       {timecard.status === "rejected" && timecard.rejection_note && (
-        <div className="mb-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-4 py-3 text-sm text-red-700 dark:text-red-300">
+        <div
+          data-testid="rejection-banner"
+          className="mb-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-4 py-3 text-sm text-red-700 dark:text-red-300"
+        >
           <strong>Rejection reason:</strong> {timecard.rejection_note}
         </div>
       )}

@@ -1,4 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
+import { config } from "dotenv";
+import { resolve } from "path";
+
+// Load .env.local so AUTH_SECRET is available to both the test process
+// and the webServer command — ensures the JWT we craft matches what
+// the dev server expects to decrypt.
+config({ path: resolve(__dirname, ".env.local") });
 
 export default defineConfig({
   testDir: "./e2e",

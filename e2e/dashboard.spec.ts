@@ -7,7 +7,7 @@
  * - Each test sets up its own routes so scenarios are fully isolated.
  *
  * Run with: npm run test:e2e
- * Requires: NEXTAUTH_SECRET env var (or the dev default "secret")
+ * Requires: AUTH_SECRET env var (loaded automatically from .env.local via playwright.config.ts)
  */
 
 import { test, expect, type Page, type Route } from "@playwright/test";
@@ -22,23 +22,21 @@ import {
   mockTimecardRejected,
   mockEntriesComplete,
   CURRENT_WEEK_START,
-  CURRENT_WEEK_END,
   PREV_WEEK_START,
-  PREV_WEEK_END,
+  CURRENT_WEEK_LABEL,
+  PREV_WEEK_LABEL,
+  CURRENT_WEEK_MONDAY,
 } from "./helpers/fixtures";
 
 const TEST_USER = { email: "employee@example.com", name: "Test Employee", role: "employee" as const };
 
 /** Intercept GET /api/timecard (any ?week= param) with a single response payload */
 async function mockTimecardGet(page: Page, payload: Record<string, unknown>) {
-  await page.route("**/api/timecard?**", (route: Route) => {
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
-  });
-  await page.route("**/api/timecard", (route: Route) => {
-    if (route.request().method() === "GET") {
+  await page.route("**/api/timecard**", (route: Route) => {
+    if (route.request().method() === "GET" && !route.request().url().includes("/submit")) {
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 }
@@ -49,8 +47,8 @@ async function mockTimecardGetByWeek(
   weekPayloads: Record<string, Record<string, unknown>>
 ) {
   await page.route("**/api/timecard**", (route: Route) => {
-    if (route.request().method() !== "GET") {
-      route.continue();
+    if (route.request().method() !== "GET" || route.request().url().includes("/submit")) {
+      route.fallback();
       return;
     }
     const url = new URL(route.request().url());
@@ -59,7 +57,7 @@ async function mockTimecardGetByWeek(
     if (payload) {
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 }
@@ -69,7 +67,7 @@ async function mockTimecardPost(page: Page, status = 200) {
     if (route.request().method() === "POST") {
       route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ entry: {} }) });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 }
@@ -94,47 +92,39 @@ test.beforeEach(async ({ context }) => {
 
 // 1. Happy path — fill entries for current week and submit
 test("happy path: fill entries and submit timecard for current week", async ({ page }) => {
-  // Initial load: draft timecard, no entries
   const draftPayload = timecardResponse(mockTimecardDraft, mockPayPeriodCurrent, []);
   await mockTimecardGet(page, draftPayload);
   await mockTimecardPost(page);
 
-  // After submit, return submitted timecard
   const submittedPayload = timecardResponse(mockTimecardSubmitted, mockPayPeriodCurrent, mockEntriesComplete);
   await mockTimecardSubmit(page);
 
   await page.goto("/dashboard");
   await page.waitForSelector("table");
 
-  // Verify "This week" label shows in the header
+  // Verify "This week" label and week range in the nav label
   await expect(page.getByText("This week")).toBeVisible();
+  await expect(page.getByTestId("week-nav-label")).toContainText(CURRENT_WEEK_LABEL);
 
-  // Verify the week range is shown
-  await expect(page.getByText(/May 11.*May 17|May 4.*May 10/)).toBeVisible();
-
-  // Fill in clock-in and clock-out for Monday (2025-05-12)
+  // Fill in clock-in and clock-out for Monday
   const rows = page.locator("tbody tr");
-  const mondayRow = rows.nth(1); // index 0 = Sunday, 1 = Monday
+  const mondayRow = rows.nth(1);
   await mondayRow.locator('input[type="time"]').first().fill("09:00");
   await mondayRow.locator('input[type="time"]').last().fill("17:00");
   await mondayRow.locator('input[type="time"]').last().blur();
 
-  // After submit succeeds, mock the reload to return submitted timecard
+  // After submit, mock the reload to return submitted timecard
   await page.route("**/api/timecard**", (route) => {
-    if (route.request().method() === "GET") {
+    if (route.request().method() === "GET" && !route.request().url().includes("/submit")) {
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(submittedPayload) });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 
-  // Click submit
   await page.getByRole("button", { name: /submit timecard/i }).click();
 
-  // Should show "Submitted" badge after reload
   await expect(page.getByText(/submitted.*pending review/i)).toBeVisible();
-
-  // Submit button should no longer be visible
   await expect(page.getByRole("button", { name: /submit timecard/i })).not.toBeVisible();
 });
 
@@ -152,25 +142,16 @@ test("week navigation: clicking ← loads the previous week", async ({ page }) =
   await page.goto("/dashboard");
   await page.waitForSelector("table");
 
-  // Verify current week is shown
   await expect(page.getByText("This week")).toBeVisible();
+  await expect(page.getByRole("button", { name: /next week/i })).toBeDisabled();
 
-  // Verify next (→) button is disabled on current week
-  const nextBtn = page.getByRole("button", { name: /next week/i });
-  await expect(nextBtn).toBeDisabled();
-
-  // Click previous week
   await page.getByRole("button", { name: /previous week/i }).click();
   await page.waitForTimeout(300);
 
-  // "This week" label should disappear
+  // "This week" label should disappear, prev week range should appear
   await expect(page.getByText("This week")).not.toBeVisible();
-
-  // Previous week range should appear
-  await expect(page.getByText(new RegExp(`${PREV_WEEK_START}|May 4`))).toBeVisible();
-
-  // Next button should now be enabled
-  await expect(nextBtn).toBeEnabled();
+  await expect(page.getByTestId("week-nav-label")).toContainText(PREV_WEEK_LABEL);
+  await expect(page.getByRole("button", { name: /next week/i })).toBeEnabled();
 });
 
 // 3. Forward navigation is blocked on current week
@@ -183,7 +164,6 @@ test("forward navigation: → button is disabled on current week", async ({ page
   const nextBtn = page.getByRole("button", { name: /next week/i });
   await expect(nextBtn).toBeDisabled();
 
-  // Clicking it should not navigate (button is disabled)
   await nextBtn.click({ force: true });
   await expect(page.getByText("This week")).toBeVisible();
 });
@@ -209,14 +189,12 @@ test("past week: auto-creates draft and allows entry and submission", async ({ p
   await page.goto("/dashboard");
   await page.waitForSelector("table");
 
-  // Navigate to previous week
   await page.getByRole("button", { name: /previous week/i }).click();
   await page.waitForTimeout(300);
 
   // Should show editable inputs (draft state)
   await expect(page.locator('input[type="time"]').first()).toBeVisible();
 
-  // Fill an entry
   const rows = page.locator("tbody tr");
   const mondayRow = rows.nth(1);
   await mondayRow.locator('input[type="time"]').first().fill("08:00");
@@ -225,10 +203,10 @@ test("past week: auto-creates draft and allows entry and submission", async ({ p
 
   // Mock GET to return submitted after submit
   await page.route("**/api/timecard**", (route) => {
-    if (route.request().method() === "GET") {
+    if (route.request().method() === "GET" && !route.request().url().includes("/submit")) {
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(prevWeekSubmittedPayload) });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 
@@ -246,13 +224,8 @@ test("read-only: submitted timecard shows plain text, no submit button", async (
   await page.goto("/dashboard");
   await page.waitForSelector("table");
 
-  // No editable inputs in the table
   await expect(page.locator('input[type="time"]')).not.toBeVisible();
-
-  // Status badge visible
   await expect(page.getByText(/submitted.*pending review/i)).toBeVisible();
-
-  // No submit button
   await expect(page.getByRole("button", { name: /submit timecard/i })).not.toBeVisible();
 });
 
@@ -282,34 +255,34 @@ test("rejection flow: shows rejection note banner and allows re-submission", asy
   await page.waitForSelector("table");
 
   // Rejection banner should be visible
-  await expect(page.getByText(/rejection reason/i)).toBeVisible();
+  await expect(page.locator('[data-testid="rejection-banner"]')).toBeVisible();
   await expect(page.getByText("Missing Saturday entry")).toBeVisible();
 
-  // Timecard should be editable (inputs visible)
+  // Timecard should be editable
   await expect(page.locator('input[type="time"]').first()).toBeVisible();
 
   // Status badge shows "Rejected"
-  await expect(page.getByText(/^rejected$/i)).toBeVisible();
+  await expect(page.getByText("Rejected")).toBeVisible();
 
-  // Re-submit button should be available
+  // Re-submit button available
   await expect(page.getByRole("button", { name: /submit timecard/i })).toBeVisible();
 
   // After submit, mock GET to return submitted
   await page.route("**/api/timecard**", (route) => {
-    if (route.request().method() === "GET") {
+    if (route.request().method() === "GET" && !route.request().url().includes("/submit")) {
       route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(timecardResponse(mockTimecardSubmitted, mockPayPeriodCurrent, mockEntriesComplete)),
       });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 
   await page.getByRole("button", { name: /submit timecard/i }).click();
   await expect(page.getByText(/submitted.*pending review/i)).toBeVisible();
-  await expect(page.getByText(/rejection reason/i)).not.toBeVisible();
+  await expect(page.locator('[data-testid="rejection-banner"]')).not.toBeVisible();
 });
 
 // 7. Auto-save: entry change is persisted via POST after blur
@@ -318,13 +291,12 @@ test("auto-save: time entry is saved on blur", async ({ page }) => {
 
   await mockTimecardGet(page, timecardResponse(mockTimecardDraft, mockPayPeriodCurrent, []));
 
-  // Capture the POST body to verify auto-save
   await page.route("**/api/timecard", async (route) => {
     if (route.request().method() === "POST") {
       savedBody = await route.request().postDataJSON() as Record<string, unknown>;
       route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entry: {} }) });
     } else {
-      route.continue();
+      route.fallback();
     }
   });
 
@@ -332,17 +304,16 @@ test("auto-save: time entry is saved on blur", async ({ page }) => {
   await page.waitForSelector("table");
 
   const rows = page.locator("tbody tr");
-  const mondayRow = rows.nth(1); // Monday
+  const mondayRow = rows.nth(1);
   await mondayRow.locator('input[type="time"]').first().fill("09:00");
   await mondayRow.locator('input[type="time"]').first().blur();
 
-  // Wait for auto-save to fire (debounced or immediate on blur)
   await page.waitForTimeout(1200);
 
   expect(savedBody).not.toBeNull();
   expect(savedBody).toMatchObject({
     clock_in: "09:00",
-    work_date: expect.stringMatching(/2025-05-12/),
+    work_date: CURRENT_WEEK_MONDAY,
   });
 });
 
@@ -357,10 +328,7 @@ test("closed pay period: draft timecard is read-only", async ({ page }) => {
   await page.goto("/dashboard");
   await page.waitForSelector("table");
 
-  // Inputs should NOT be visible even though status is draft
   await expect(page.locator('input[type="time"]')).not.toBeVisible();
-
-  // Submit button should not appear
   await expect(page.getByRole("button", { name: /submit timecard/i })).not.toBeVisible();
 });
 
@@ -380,17 +348,14 @@ test("navigation: going back then forward returns to current week", async ({ pag
 
   await expect(page.getByText("This week")).toBeVisible();
 
-  // Go back
   await page.getByRole("button", { name: /previous week/i }).click();
   await page.waitForTimeout(300);
   await expect(page.getByText("This week")).not.toBeVisible();
 
-  // Go forward
   await page.getByRole("button", { name: /next week/i }).click();
   await page.waitForTimeout(300);
   await expect(page.getByText("This week")).toBeVisible();
 
-  // → button should be disabled again
   await expect(page.getByRole("button", { name: /next week/i })).toBeDisabled();
 });
 
@@ -401,10 +366,6 @@ test("week header: shows correct Sun–Sat range and 'This week' for current wee
   await page.goto("/dashboard");
   await page.waitForSelector("table");
 
-  // "This week" should be present
   await expect(page.getByText(/this week/i)).toBeVisible();
-
-  // The pay period start and end months/dates should be in the header
-  await expect(page.getByText(new RegExp(`${CURRENT_WEEK_START}|May 11`))).toBeVisible();
-  await expect(page.getByText(new RegExp(`${CURRENT_WEEK_END}|May 17`))).toBeVisible();
+  await expect(page.getByTestId("week-nav-label")).toContainText(CURRENT_WEEK_LABEL);
 });

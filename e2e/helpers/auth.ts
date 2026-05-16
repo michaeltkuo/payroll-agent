@@ -15,7 +15,7 @@ export type TestUser = {
 };
 
 export async function setAuthCookie(context: BrowserContext, user: TestUser): Promise<void> {
-  const secret = process.env.NEXTAUTH_SECRET ?? "secret";
+  const secret = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET ?? "secret";
   const now = Math.floor(Date.now() / 1000);
 
   const token = await encode({
