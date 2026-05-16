@@ -98,8 +98,11 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load(weekStartStr);
-  }, [weekOffset, load]); // weekOffset drives weekStartStr; weekOffset change → reload
+    // weekOffset drives weekStartStr via useMemo; listing both would double-trigger
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weekOffset, load]);
 
   const navigateWeek = (direction: -1 | 1) => {
     // Flush and clear any pending autosaves before switching weeks
