@@ -27,6 +27,7 @@ import {
   CURRENT_WEEK_LABEL,
   PREV_WEEK_LABEL,
   CURRENT_WEEK_MONDAY,
+  PREV_WEEK_MONDAY,
 } from "./helpers/fixtures";
 
 const TEST_USER = { email: "employee@example.com", name: "Test Employee", role: "employee" as const };
@@ -63,10 +64,25 @@ async function mockTimecardGetByWeek(
   });
 }
 
-async function mockTimecardPost(page: Page, status = 200) {
+async function mockTimecardPost(page: Page, status = 200, entryId = "new-entry-1") {
   await page.route("**/api/timecard", (route: Route) => {
     if (route.request().method() === "POST") {
-      route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ entry: {} }) });
+      route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify({
+          entry: {
+            id: entryId,
+            work_date: CURRENT_WEEK_MONDAY,
+            clock_in: null,
+            clock_out: null,
+            notes: null,
+            rate_id: null,
+            entry_order: 0,
+            created_at: "",
+          },
+        }),
+      });
     } else {
       route.fallback();
     }
@@ -97,6 +113,11 @@ test("happy path: fill entries and submit timecard for current week", async ({ p
   await mockTimecardGet(page, draftPayload);
   await mockTimecardPost(page);
 
+  // Mock PATCH for auto-save after entry is added
+  await page.route("**/api/timecard/entry/**", (route: Route) => {
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true }) });
+  });
+
   const submittedPayload = timecardResponse(mockTimecardSubmitted, mockPayPeriodCurrent, mockEntriesComplete);
   await mockTimecardSubmit(page);
 
@@ -107,7 +128,12 @@ test("happy path: fill entries and submit timecard for current week", async ({ p
   await expect(page.getByText("This week")).toBeVisible();
   await expect(page.getByTestId("week-nav-label")).toContainText(CURRENT_WEEK_LABEL);
 
-  // Fill in clock-in and clock-out for Monday
+  // Add an entry for Monday, then fill clock-in and clock-out
+  await page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`).click();
+  await page.waitForResponse(
+    (res) => res.url().includes("/api/timecard") && res.request().method() === "POST"
+  );
+
   const rows = page.locator("tbody tr");
   const mondayRow = rows.nth(1);
   await mondayRow.locator('input[type="time"]').first().fill("09:00");
@@ -146,8 +172,15 @@ test("week navigation: clicking ← loads the previous week", async ({ page }) =
   await expect(page.getByText("This week")).toBeVisible();
   await expect(page.getByRole("button", { name: /next week/i })).toBeDisabled();
 
+  // Wait for the prev week API response before asserting
+  const prevWeekResponsePromise = page.waitForResponse(
+    (res) =>
+      res.url().includes("/api/timecard") &&
+      !res.url().includes("submit") &&
+      new URL(res.url()).searchParams.get("week") === PREV_WEEK_START
+  );
   await page.getByRole("button", { name: /previous week/i }).click();
-  await page.waitForTimeout(300);
+  await prevWeekResponsePromise;
 
   // "This week" label should disappear, prev week range should appear
   await expect(page.getByText("This week")).not.toBeVisible();
@@ -187,17 +220,35 @@ test("past week: auto-creates draft and allows entry and submission", async ({ p
   await mockTimecardPost(page);
   await mockTimecardSubmit(page);
 
+  // Mock PATCH for auto-save
+  await page.route("**/api/timecard/entry/**", (route: Route) => {
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true }) });
+  });
+
   await page.goto("/dashboard");
   await page.waitForSelector("table");
 
+  // Navigate to prev week and wait for data
+  const prevWeekResponsePromise = page.waitForResponse(
+    (res) =>
+      res.url().includes("/api/timecard") &&
+      !res.url().includes("submit") &&
+      new URL(res.url()).searchParams.get("week") === PREV_WEEK_START
+  );
   await page.getByRole("button", { name: /previous week/i }).click();
-  await page.waitForTimeout(300);
+  await prevWeekResponsePromise;
+
+  // Empty draft — add entry for Monday first
+  await page.getByTestId(`add-entry-${PREV_WEEK_MONDAY}`).click();
+  await page.waitForResponse(
+    (res) => res.url().includes("/api/timecard") && res.request().method() === "POST"
+  );
 
   // Should show editable inputs (draft state)
-  await expect(page.locator('input[type="time"]').first()).toBeVisible();
-
   const rows = page.locator("tbody tr");
   const mondayRow = rows.nth(1);
+  await expect(mondayRow.locator('input[type="time"]').first()).toBeVisible();
+
   await mondayRow.locator('input[type="time"]').first().fill("08:00");
   await mondayRow.locator('input[type="time"]').last().fill("16:00");
   await mondayRow.locator('input[type="time"]').last().blur();
@@ -286,16 +337,28 @@ test("rejection flow: shows rejection note banner and allows re-submission", asy
   await expect(page.locator('[data-testid="rejection-banner"]')).not.toBeVisible();
 });
 
-// 7. Auto-save: entry change is persisted via POST after blur
+// 7. Auto-save: entry field change is persisted via PATCH after blur
 test("auto-save: time entry is saved on blur", async ({ page }) => {
-  let savedBody: Record<string, unknown> | null = null;
+  let patchBody: Record<string, unknown> | null = null;
 
-  await mockTimecardGet(page, timecardResponse(mockTimecardDraft, mockPayPeriodCurrent, []));
+  // Load with a pre-existing entry (has an ID so PATCH can fire on blur)
+  const existingEntry = {
+    id: "e-monday",
+    work_date: CURRENT_WEEK_MONDAY,
+    clock_in: "09:00:00",
+    clock_out: null,
+    total_hours: null,
+    notes: null,
+    rate_id: null,
+    entry_order: 0,
+    created_at: "",
+  };
+  await mockTimecardGet(page, timecardResponse(mockTimecardDraft, mockPayPeriodCurrent, [existingEntry]));
 
-  await page.route("**/api/timecard", async (route) => {
-    if (route.request().method() === "POST") {
-      savedBody = await route.request().postDataJSON() as Record<string, unknown>;
-      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entry: {} }) });
+  await page.route("**/api/timecard/entry/**", async (route) => {
+    if (route.request().method() === "PATCH") {
+      patchBody = (await route.request().postDataJSON()) as Record<string, unknown>;
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ success: true }) });
     } else {
       route.fallback();
     }
@@ -306,16 +369,15 @@ test("auto-save: time entry is saved on blur", async ({ page }) => {
 
   const rows = page.locator("tbody tr");
   const mondayRow = rows.nth(1);
-  await mondayRow.locator('input[type="time"]').first().fill("09:00");
-  await mondayRow.locator('input[type="time"]').first().blur();
+  await expect(mondayRow.locator('input[type="time"]').last()).toBeVisible();
 
-  await page.waitForTimeout(1200);
+  await mondayRow.locator('input[type="time"]').last().fill("17:00");
+  await mondayRow.locator('input[type="time"]').last().blur();
 
-  expect(savedBody).not.toBeNull();
-  expect(savedBody).toMatchObject({
-    clock_in: "09:00",
-    work_date: CURRENT_WEEK_MONDAY,
-  });
+  await page.waitForTimeout(500);
+
+  expect(patchBody).not.toBeNull();
+  expect(patchBody).toMatchObject({ clock_out: "17:00" });
 });
 
 // 8. Closed pay period — draft timecard is read-only
@@ -349,12 +411,24 @@ test("navigation: going back then forward returns to current week", async ({ pag
 
   await expect(page.getByText("This week")).toBeVisible();
 
+  const prevResponse = page.waitForResponse(
+    (res) =>
+      res.url().includes("/api/timecard") &&
+      !res.url().includes("submit") &&
+      new URL(res.url()).searchParams.get("week") === PREV_WEEK_START
+  );
   await page.getByRole("button", { name: /previous week/i }).click();
-  await page.waitForTimeout(300);
+  await prevResponse;
   await expect(page.getByText("This week")).not.toBeVisible();
 
+  const currResponse = page.waitForResponse(
+    (res) =>
+      res.url().includes("/api/timecard") &&
+      !res.url().includes("submit") &&
+      new URL(res.url()).searchParams.get("week") === CURRENT_WEEK_START
+  );
   await page.getByRole("button", { name: /next week/i }).click();
-  await page.waitForTimeout(300);
+  await currResponse;
   await expect(page.getByText("This week")).toBeVisible();
 
   await expect(page.getByRole("button", { name: /next week/i })).toBeDisabled();

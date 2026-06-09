@@ -94,6 +94,7 @@ export default function DashboardPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [localEntries, setLocalEntries] = useState<Record<string, EntryDraft[]>>({});
   const saveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const weekStartStr = useMemo(() => {
     const base = getWeekStart(new Date());
@@ -102,12 +103,20 @@ export default function DashboardPage() {
   }, [weekOffset]);
 
   const load = useCallback(async (week: string) => {
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setLoading(true);
-    const res = await fetch(`/api/timecard?week=${week}`);
-    if (res.ok) {
-      const json = (await res.json()) as DashboardData;
-      setData(json);
-      setLocalEntries(entriesToDraftMap(json.entries));
+    try {
+      const res = await fetch(`/api/timecard?week=${week}`, { signal: controller.signal });
+      if (res.ok) {
+        const json = (await res.json()) as DashboardData;
+        setData(json);
+        setLocalEntries(entriesToDraftMap(json.entries));
+      }
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return;
     }
     setLoading(false);
   }, []);
