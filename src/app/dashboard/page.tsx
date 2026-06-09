@@ -136,7 +136,7 @@ export default function DashboardPage() {
 
   const isEditable =
     (data?.timecard.status === "draft" || data?.timecard.status === "rejected") &&
-    data?.pay_period.status === "open";
+    data?.pay_period.status !== "closed";
 
   const patchEntry = useCallback(async (entryId: string, values: Partial<EntryDraft>) => {
     await fetch(`/api/timecard/entry/${entryId}`, {

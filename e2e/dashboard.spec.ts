@@ -128,11 +128,12 @@ test("happy path: fill entries and submit timecard for current week", async ({ p
   await expect(page.getByText("This week")).toBeVisible();
   await expect(page.getByTestId("week-nav-label")).toContainText(CURRENT_WEEK_LABEL);
 
-  // Add an entry for Monday, then fill clock-in and clock-out
-  await page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`).click();
-  await page.waitForResponse(
+  // Add an entry for Monday — set up waitForResponse BEFORE the click to avoid race
+  const addEntryResponse = page.waitForResponse(
     (res) => res.url().includes("/api/timecard") && res.request().method() === "POST"
   );
+  await page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`).click();
+  await addEntryResponse;
 
   const rows = page.locator("tbody tr");
   const mondayRow = rows.nth(1);
@@ -239,10 +240,11 @@ test("past week: auto-creates draft and allows entry and submission", async ({ p
   await prevWeekResponsePromise;
 
   // Empty draft — add entry for Monday first
-  await page.getByTestId(`add-entry-${PREV_WEEK_MONDAY}`).click();
-  await page.waitForResponse(
+  const addEntryResponse4 = page.waitForResponse(
     (res) => res.url().includes("/api/timecard") && res.request().method() === "POST"
   );
+  await page.getByTestId(`add-entry-${PREV_WEEK_MONDAY}`).click();
+  await addEntryResponse4;
 
   // Should show editable inputs (draft state)
   const rows = page.locator("tbody tr");
@@ -522,4 +524,52 @@ test("rate dropdown: selecting a rate shows dollar summary", async ({ page }) =>
   // Dollar breakdown should appear
   await expect(page.getByTestId("dollar-breakdown")).toBeVisible();
   await expect(page.getByTestId("dollar-total")).toBeVisible();
+});
+
+// 13. Null pay period status — treated as open, dashboard is editable
+test("null pay period status: draft timecard is editable (pre-migration rows)", async ({ page }) => {
+  // Simulate a legacy pay period row where status was never set
+  const legacyPeriod = { ...mockPayPeriodCurrent, status: null };
+
+  await mockTimecardGet(
+    page,
+    timecardResponse(mockTimecardDraft, legacyPeriod as never, [])
+  );
+
+  await page.route("**/api/timecard", (route: Route) => {
+    if (route.request().method() === "POST") {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          entry: {
+            id: "new-entry-null-status",
+            work_date: CURRENT_WEEK_MONDAY,
+            clock_in: null,
+            clock_out: null,
+            notes: null,
+            rate_id: null,
+            entry_order: 0,
+            created_at: "",
+          },
+        }),
+      });
+    } else {
+      route.fallback();
+    }
+  });
+
+  await page.goto("/dashboard");
+  await page.waitForSelector("table");
+
+  // The + Add button must be visible, confirming isEditable is true
+  await expect(page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`)).toBeVisible();
+
+  // Clicking it should render time inputs
+  const addEntryResponse13 = page.waitForResponse(
+    (res) => res.url().includes("/api/timecard") && res.request().method() === "POST"
+  );
+  await page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`).click();
+  await addEntryResponse13;
+  await expect(page.locator('input[type="time"]').first()).toBeVisible();
 });
