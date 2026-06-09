@@ -73,7 +73,7 @@ gh pr create --title "type: description" --fill
 
 **Always include the Co-authored-by trailer in commits.**
 
-`main` is protected: the `Tests` CI check must pass before merging. Vercel auto-deploys on merge to `main`.
+`main` is protected: the `Tests` CI check must pass before merging. On merge to main, the `Migrate DB` workflow (`db-migrate.yml`) automatically applies any migration files to production. Vercel auto-deploys on merge to `main`.
 
 ---
 
