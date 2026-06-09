@@ -95,11 +95,46 @@ src/tests/             # Vitest unit tests (≥90% coverage)
   api/timecard-submit.test.ts
 
 supabase/
-  schema.sql           # Full database schema
+  schema.sql           # Full database schema (source of truth for new projects)
+  migrations/          # Incremental SQL migration files (apply to existing projects)
 
 .github/
   workflows/ci.yml     # GitHub Actions CI
 ```
+
+---
+
+## Database Migrations
+
+Schema changes are tracked as numbered SQL files in `supabase/migrations/`. Each file is safe to re-run (uses `IF NOT EXISTS` / `IF EXISTS` guards).
+
+### Applying migrations to a Supabase project
+
+Paste the relevant migration file(s) into the **Supabase SQL Editor** for your project and run them. They are idempotent — running the same file twice is safe.
+
+**Production:**
+```
+Supabase Dashboard → your project → SQL Editor → paste & run
+```
+
+**Local dev** (if using Supabase CLI):
+```bash
+supabase db push
+```
+
+### Writing a new migration
+
+1. Add a file: `supabase/migrations/NNN_short_description.sql`
+   - `NNN` is the next sequential number (`002`, `003`, …)
+2. Use `IF NOT EXISTS` / `IF EXISTS` / `ADD COLUMN IF NOT EXISTS` so the file is safe to re-run
+3. Include a comment at the top with the date, context, and what it changes
+4. Update `supabase/schema.sql` to reflect the new full schema state
+
+### Migration history
+
+| # | File | Description |
+|---|------|-------------|
+| 001 | `001_add_rates_and_multi_entry.sql` | Add `employee_rates` table; add `rate_id` + `entry_order` to `time_entries`; drop one-entry-per-day unique constraint |
 
 ---
 

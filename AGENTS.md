@@ -122,6 +122,24 @@ await page.route("**/api/timecard**", (route) => {
 
 ---
 
+## Database Migrations
+
+### Convention
+- Schema changes go in `supabase/migrations/NNN_short_name.sql` (sequential numbers: `001`, `002`, …)
+- Always use `IF NOT EXISTS` / `IF EXISTS` / `ADD COLUMN IF NOT EXISTS` — every migration file must be safe to re-run
+- After adding a migration, also update `supabase/schema.sql` to reflect the new full schema state
+- Never alter `supabase/schema.sql` alone — that file is used for new-project setup only, not for applying incremental changes to existing DBs
+
+### Applying migrations to an existing Supabase project
+Paste the file into the **Supabase SQL Editor** and run it. Or, if using Supabase CLI: `supabase db push`.
+
+### Migration history
+| # | File | Description |
+|---|------|-------------|
+| 001 | `001_add_rates_and_multi_entry.sql` | Add `employee_rates`; add `rate_id` + `entry_order` to `time_entries`; drop one-entry-per-day unique constraint |
+
+---
+
 ## Database schema summary
 
 ```sql
