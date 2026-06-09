@@ -219,6 +219,26 @@ describe("getPayPeriodForWeek", () => {
 
     expect(selectChain.eq).toHaveBeenCalledWith("start_date", "2025-05-11");
   });
+
+  it("coerces null status to 'open' for pre-migration rows", async () => {
+    const legacyPayPeriod = { ...mockPayPeriod, status: null };
+    const selectChain = makeSelectChain({ data: legacyPayPeriod, error: null });
+    mockFrom.mockReturnValue(selectChain);
+
+    const result = await getPayPeriodForWeek(mockSupabase, wednesday);
+
+    expect(result.status).toBe("open");
+  });
+
+  it("leaves 'closed' status unchanged", async () => {
+    const closedPayPeriod = { ...mockPayPeriod, status: "closed" };
+    const selectChain = makeSelectChain({ data: closedPayPeriod, error: null });
+    mockFrom.mockReturnValue(selectChain);
+
+    const result = await getPayPeriodForWeek(mockSupabase, wednesday);
+
+    expect(result.status).toBe("closed");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -62,7 +62,12 @@ export async function getPayPeriodForWeek(
     .maybeSingle();
 
   if (error) throw new Error(`Failed to fetch pay period: ${error.message}`);
-  if (existing) return existing as PayPeriod;
+  if (existing) {
+    // Rows created before the status column was added may have null; default to "open"
+    const pp = existing as PayPeriod & { status: string | null };
+    if (!pp.status) pp.status = "open";
+    return pp as PayPeriod;
+  }
 
   const { data: created, error: createError } = await supabase
     .from("pay_periods")
