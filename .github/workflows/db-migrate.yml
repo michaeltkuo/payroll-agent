@@ -29,6 +29,18 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -e
+
+          # Guard: skip gracefully if the secret has not been configured yet.
+          # Without this, psql falls back to a local Unix socket that does not
+          # exist on the GitHub Actions runner and the job crashes with exit 2.
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "⚠️  SUPABASE_DB_URL secret is not set — skipping migration."
+            echo "   To enable auto-migrations add it in:"
+            echo "   Repo → Settings → Secrets and variables → Actions → New repository secret"
+            echo "   Value: postgresql://postgres:[password]@db.[ref].supabase.co:5432/postgres"
+            exit 0
+          fi
+
           MIGRATION_DIR="supabase/migrations"
           if [ ! -d "$MIGRATION_DIR" ]; then
             echo "No migrations directory found, skipping."
