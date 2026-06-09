@@ -1,0 +1,50 @@
+name: Migrate DB
+
+# Runs automatically after a successful merge to main.
+# Applies any pending migration files in supabase/migrations/ to the
+# production Supabase database.
+#
+# Required GitHub Secret:
+#   SUPABASE_DB_URL — Postgres connection URI (URI tab in Supabase
+#                     Dashboard → Project Settings → Database → Connection string)
+#                     e.g. postgresql://postgres:[password]@db.[ref].supabase.co:5432/postgres
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  migrate:
+    name: Apply DB migrations
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get install -y postgresql-client
+
+      - name: Run migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -e
+          MIGRATION_DIR="supabase/migrations"
+          if [ ! -d "$MIGRATION_DIR" ]; then
+            echo "No migrations directory found, skipping."
+            exit 0
+          fi
+
+          # Find all .sql files sorted numerically/lexicographically
+          FILES=$(find "$MIGRATION_DIR" -name "*.sql" | sort)
+          if [ -z "$FILES" ]; then
+            echo "No migration files found, nothing to apply."
+            exit 0
+          fi
+
+          echo "Applying migrations..."
+          for FILE in $FILES; do
+            echo "  → $FILE"
+            psql "$SUPABASE_DB_URL" -f "$FILE"
+          done
+          echo "All migrations applied successfully."

@@ -45,10 +45,11 @@ npm run lint          # ESLint
 ## CI/CD Pipeline
 
 ```
-Push/PR → GitHub Actions (Tests job) → merge to main → Vercel deploys
+Push/PR → GitHub Actions (Tests job) → merge to main → DB Migrate job → Vercel deploys
 ```
 
-- **CI** runs `npm run test:coverage` then `npx playwright test`
+- **Tests CI** (`ci.yml`) — runs `npm run test:coverage` then `npx playwright test` on every push/PR
+- **DB Migrate** (`db-migrate.yml`) — runs all migration files in `supabase/migrations/` against production on every merge to main
 - **Branch protection**: `main` requires the `Tests` check to pass before merge
 - **Vercel** auto-deploys `main` on every merge; also creates Preview Deployments for PRs
 
@@ -59,9 +60,13 @@ Add these in **Repo → Settings → Secrets and variables → Actions**:
 | Secret | Where to find it |
 |---|---|
 | `AUTH_SECRET` | Your `.env.local` |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project settings |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase project settings |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase project settings |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase Dashboard → Project Settings → API |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Dashboard → Project Settings → API |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase Dashboard → Project Settings → API |
+| `SUPABASE_DB_URL` | Supabase Dashboard → Project Settings → Database → Connection string → URI |
+
+> **`SUPABASE_DB_URL` format**: `postgresql://postgres:[password]@db.[project-ref].supabase.co:5432/postgres`
+> Used only by the `Migrate DB` GitHub Actions job to apply schema migrations.
 
 ---
 
