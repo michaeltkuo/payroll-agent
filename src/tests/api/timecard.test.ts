@@ -59,7 +59,7 @@ const MOCK_ENTRIES = [
 function makeChain(value: { data: unknown; error: unknown }) {
   const methods = [
     "select", "eq", "lte", "gte",
-    "insert", "upsert", "update", "order",
+    "insert", "upsert", "update", "delete", "order", "in",
   ] as const;
 
   const builder: Record<string, unknown> = {};
@@ -131,6 +131,7 @@ describe("GET /api/timecard", () => {
       { data: MOCK_USER, error: null },    // user lookup
       { data: MOCK_TIMECARD, error: null }, // timecard upsert
       { data: MOCK_ENTRIES, error: null },  // entries query
+      { data: [], error: null },            // rates query
     );
 
     const req = new NextRequest("http://localhost/api/timecard");
@@ -140,6 +141,7 @@ describe("GET /api/timecard", () => {
     expect(body.pay_period).toEqual(MOCK_PAY_PERIOD);
     expect(body.timecard).toEqual(MOCK_TIMECARD);
     expect(body.entries).toEqual(MOCK_ENTRIES);
+    expect(body.rates).toEqual([]);
   });
 
   it("accepts a ?week= param and calls getPayPeriodForWeek with the normalised Sunday", async () => {
@@ -147,6 +149,7 @@ describe("GET /api/timecard", () => {
       { data: MOCK_USER, error: null },
       { data: MOCK_TIMECARD, error: null },
       { data: [], error: null },
+      { data: [], error: null }, // rates
     );
     vi.mocked(getPayPeriodForWeek).mockResolvedValue({
       ...MOCK_PAY_PERIOD,
@@ -167,6 +170,7 @@ describe("GET /api/timecard", () => {
       { data: MOCK_USER, error: null },
       { data: MOCK_TIMECARD, error: null },
       { data: null, error: null }, // entries returns null
+      { data: null, error: null }, // rates returns null
     );
 
     const req = new NextRequest("http://localhost/api/timecard");
@@ -183,6 +187,7 @@ describe("GET /api/timecard", () => {
       { data: null, error: null },      // upsert maybeSingle → null (duplicate ignored)
       { data: MOCK_TIMECARD, error: null }, // fallback single SELECT
       { data: MOCK_ENTRIES, error: null },
+      { data: [], error: null }, // rates
     );
 
     const req = new NextRequest("http://localhost/api/timecard");
@@ -265,12 +270,13 @@ describe("POST /api/timecard", () => {
     expect(res.status).toBe(409);
   });
 
-  it("upserts the time entry and returns 200 on success", async () => {
-    const savedEntry = { ...MOCK_ENTRIES[0], clock_in: "08:00:00", clock_out: "16:00:00" };
+  it("inserts a new time entry and returns 200 on success", async () => {
+    const savedEntry = { ...MOCK_ENTRIES[0], clock_in: "08:00:00", clock_out: "16:00:00", entry_order: 0 };
     makeFrom(
       { data: MOCK_USER, error: null },
       { data: MOCK_TIMECARD, error: null },
-      { data: savedEntry, error: null }, // upsert entry → single()
+      { data: [], error: null },          // existing entries for entry_order
+      { data: savedEntry, error: null },  // insert entry → single()
     );
     const res = await POST(
       makePostRequest({ work_date: "2025-05-12", clock_in: "08:00", clock_out: "16:00", week: "2025-05-11" })
@@ -278,6 +284,41 @@ describe("POST /api/timecard", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.entry).toEqual(savedEntry);
+  });
+
+  it("inserts multiple entries for the same day without conflict", async () => {
+    const firstEntry = { ...MOCK_ENTRIES[0], entry_order: 0 };
+    const secondEntry = { ...MOCK_ENTRIES[0], id: "e2", entry_order: 1 };
+    makeFrom(
+      { data: MOCK_USER, error: null },
+      { data: MOCK_TIMECARD, error: null },
+      { data: [{ entry_order: 0 }], error: null }, // existing entries for entry_order (first already there)
+      { data: secondEntry, error: null },           // insert second entry
+    );
+    const res = await POST(
+      makePostRequest({ work_date: "2025-05-12", clock_in: "13:00", clock_out: "17:00", week: "2025-05-11" })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.entry).toEqual(secondEntry);
+    // First entry should not be affected (no conflict)
+    expect(firstEntry.entry_order).toBe(0);
+  });
+
+  it("accepts and stores rate_id in the new entry", async () => {
+    const savedEntry = { ...MOCK_ENTRIES[0], rate_id: "rate-uuid", entry_order: 0 };
+    makeFrom(
+      { data: MOCK_USER, error: null },
+      { data: MOCK_TIMECARD, error: null },
+      { data: [], error: null },
+      { data: savedEntry, error: null },
+    );
+    const res = await POST(
+      makePostRequest({ work_date: "2025-05-12", clock_in: "08:00", clock_out: "16:00", rate_id: "rate-uuid" })
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.entry.rate_id).toBe("rate-uuid");
   });
 
   it("returns 404 when timecard record is not found", async () => {
@@ -294,17 +335,19 @@ describe("POST /api/timecard", () => {
     makeFrom(
       { data: MOCK_USER, error: null },
       { data: { ...MOCK_TIMECARD, status: "rejected" }, error: null },
+      { data: [], error: null }, // existing entries for entry_order
       { data: savedEntry, error: null },
     );
     const res = await POST(makePostRequest({ work_date: "2025-05-12", clock_in: "09:00", clock_out: "17:00" }));
     expect(res.status).toBe(200);
   });
 
-  it("returns 500 when entry upsert fails", async () => {
+  it("returns 500 when entry insert fails", async () => {
     makeFrom(
       { data: MOCK_USER, error: null },
       { data: MOCK_TIMECARD, error: null },
-      { data: null, error: { message: "upsert failed" } },
+      { data: [], error: null }, // existing entries for entry_order
+      { data: null, error: { message: "insert failed" } },
     );
     const res = await POST(makePostRequest({ work_date: "2025-05-12", clock_in: "09:00", clock_out: "17:00" }));
     expect(res.status).toBe(500);

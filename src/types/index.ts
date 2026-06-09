@@ -8,6 +8,15 @@ export interface User {
   created_at: string;
 }
 
+export interface EmployeeRate {
+  id: string;
+  employee_id: string;
+  label: string;
+  hourly_rate: number;
+  is_default: boolean;
+  created_at: string;
+}
+
 export interface PayPeriod {
   id: string;
   start_date: string; // ISO date string YYYY-MM-DD
@@ -35,6 +44,9 @@ export interface TimeEntry {
   clock_out: string | null;
   total_hours: number | null;
   notes: string | null;
+  rate_id: string | null;
+  rate?: EmployeeRate | null;
+  entry_order: number;
   created_at: string;
 }
 

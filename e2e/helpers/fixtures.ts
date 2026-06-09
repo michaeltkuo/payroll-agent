@@ -4,17 +4,27 @@
  * the fixtures always match what the app computes from `new Date()`.
  */
 
+function toLocalDateStr(d: Date): string {
+  return (
+    d.getFullYear() +
+    "-" +
+    String(d.getMonth() + 1).padStart(2, "0") +
+    "-" +
+    String(d.getDate()).padStart(2, "0")
+  );
+}
+
 function computeWeekStart(offsetWeeks = 0): string {
   const now = new Date();
   const d = new Date(now);
   d.setDate(d.getDate() - d.getDay() + offsetWeeks * 7);
-  return d.toISOString().slice(0, 10);
+  return toLocalDateStr(d);
 }
 
 function addDays(iso: string, n: number): string {
   const d = new Date(iso + "T00:00:00");
   d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  return toLocalDateStr(d);
 }
 
 function fmtLabel(iso: string): string {
@@ -31,6 +41,7 @@ export const PREV_WEEK_END = addDays(PREV_WEEK_START, 6);
 
 // Weekday helpers (for assertions)
 export const CURRENT_WEEK_MONDAY = addDays(CURRENT_WEEK_START, 1);
+export const PREV_WEEK_MONDAY = addDays(PREV_WEEK_START, 1);
 
 // Human-readable label strings as the dashboard renders them
 export const CURRENT_WEEK_LABEL = `${fmtLabel(CURRENT_WEEK_START)} – ${fmtLabel(CURRENT_WEEK_END)}`;
@@ -96,7 +107,13 @@ export const mockEntriesComplete = [
 export function timecardResponse(
   timecard: Record<string, unknown>,
   pay_period: Record<string, unknown>,
-  entries: Record<string, unknown>[] = []
+  entries: Record<string, unknown>[] = [],
+  rates: Record<string, unknown>[] = []
 ) {
-  return { timecard, entries, pay_period };
+  return { timecard, entries, pay_period, rates };
 }
+
+export const mockRatesStandard = [
+  { id: "rate-1", employee_id: "user-uuid", label: "Standard", hourly_rate: 50, is_default: true, created_at: "" },
+  { id: "rate-2", employee_id: "user-uuid", label: "Events", hourly_rate: 75, is_default: false, created_at: "" },
+];

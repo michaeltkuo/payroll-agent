@@ -9,6 +9,16 @@ create table if not exists users (
   created_at timestamptz default now()
 );
 
+-- Named hourly rate profiles per employee (admin-managed)
+create table if not exists employee_rates (
+  id uuid primary key default gen_random_uuid(),
+  employee_id uuid references users(id) on delete cascade not null,
+  label text not null,
+  hourly_rate numeric(8,2) not null,
+  is_default boolean not null default false,
+  created_at timestamptz default now()
+);
+
 -- Pay periods (weekly, Sun–Sat)
 create table if not exists pay_periods (
   id uuid primary key default gen_random_uuid(),
@@ -31,7 +41,7 @@ create table if not exists timecards (
   unique(employee_id, pay_period_id)
 );
 
--- Time entries (clock-in/out per day)
+-- Time entries (clock-in/out; multiple allowed per day)
 create table if not exists time_entries (
   id uuid primary key default gen_random_uuid(),
   timecard_id uuid references timecards(id) on delete cascade not null,
@@ -44,8 +54,9 @@ create table if not exists time_entries (
     else null end
   ) stored,
   notes text,
-  created_at timestamptz default now(),
-  unique(timecard_id, work_date)
+  rate_id uuid references employee_rates(id) on delete set null,
+  entry_order int not null default 0,
+  created_at timestamptz default now()
 );
 
 -- Payroll submissions log
