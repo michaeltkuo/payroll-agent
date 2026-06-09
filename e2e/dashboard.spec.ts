@@ -21,6 +21,7 @@ import {
   mockTimecardApproved,
   mockTimecardRejected,
   mockEntriesComplete,
+  mockRatesStandard,
   CURRENT_WEEK_START,
   PREV_WEEK_START,
   CURRENT_WEEK_LABEL,
@@ -368,4 +369,83 @@ test("week header: shows correct Sun–Sat range and 'This week' for current wee
 
   await expect(page.getByText(/this week/i)).toBeVisible();
   await expect(page.getByTestId("week-nav-label")).toContainText(CURRENT_WEEK_LABEL);
+});
+
+// 11. Multi-entry: add a second entry on the same day
+test("multi-entry: add second entry on same day", async ({ page }) => {
+  const draftPayload = timecardResponse(mockTimecardDraft, mockPayPeriodCurrent, [], mockRatesStandard);
+  await mockTimecardGet(page, draftPayload);
+
+  let postCallCount = 0;
+  await page.route("**/api/timecard", async (route) => {
+    if (route.request().method() === "POST") {
+      postCallCount++;
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          entry: {
+            id: `entry-${postCallCount}`,
+            work_date: CURRENT_WEEK_MONDAY,
+            clock_in: null,
+            clock_out: null,
+            notes: null,
+            rate_id: null,
+            entry_order: postCallCount - 1,
+            created_at: "",
+          },
+        }),
+      });
+    } else {
+      route.fallback();
+    }
+  });
+
+  await page.goto("/dashboard");
+  await page.waitForSelector("table");
+
+  // Click "Add" on Monday (first time — empty row shows + Add)
+  await page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`).first().click();
+  await page.waitForTimeout(300);
+  // Click "Add" again (now shows on the last entry row)
+  await page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`).first().click();
+  await page.waitForTimeout(300);
+
+  expect(postCallCount).toBe(2);
+});
+
+// 12. Rate dropdown: select a rate and see dollar summary
+test("rate dropdown: selecting a rate shows dollar summary", async ({ page }) => {
+  const entry = {
+    id: "e1",
+    work_date: CURRENT_WEEK_MONDAY,
+    clock_in: "09:00:00",
+    clock_out: "17:00:00",
+    total_hours: 8,
+    notes: null,
+    rate_id: null,
+    entry_order: 0,
+    created_at: "",
+  };
+  const draftPayload = { ...timecardResponse(mockTimecardDraft, mockPayPeriodCurrent, [entry]), rates: mockRatesStandard };
+  await mockTimecardGet(page, draftPayload);
+
+  await page.route("**/api/timecard/entry/**", (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ entry }),
+    });
+  });
+
+  await page.goto("/dashboard");
+  await page.waitForSelector("table");
+
+  // Select the first (non-empty) rate option
+  const rateSelect = page.getByTestId(`rate-select-e1`);
+  await rateSelect.selectOption({ index: 1 });
+
+  // Dollar breakdown should appear
+  await expect(page.getByTestId("dollar-breakdown")).toBeVisible();
+  await expect(page.getByTestId("dollar-total")).toBeVisible();
 });

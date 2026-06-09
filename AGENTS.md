@@ -22,9 +22,24 @@ Weekly timecard management for employees and admins:
 - `parseWeekParam(str)` validates `?week=YYYY-MM-DD` params and returns the Sunday — always call this on incoming week params before using them
 
 ### API routes accept a `week` param
-- `GET /api/timecard?week=YYYY-MM-DD` — omit for current week
-- `POST /api/timecard` body: `{ week, work_date, clock_in, clock_out, notes }`
+- `GET /api/timecard?week=YYYY-MM-DD` — omit for current week; response includes `rates` array
+- `POST /api/timecard` body: `{ week, work_date, clock_in, clock_out, notes, rate_id? }` — always **inserts** a new entry (no date upsert)
+- `PATCH /api/timecard/entry/[id]` body: `{ clock_in, clock_out, notes, rate_id }` — update an existing entry
+- `DELETE /api/timecard/entry/[id]` — delete a single entry
 - `POST /api/timecard/submit` body: `{ week }`
+
+### Employee rates (admin-managed)
+- Rates are per-employee named profiles: `POST /api/admin/employees/[id]/rates` with `{ label, hourly_rate, is_default? }`
+- `GET /api/admin/employees/[id]/rates` — list rates for an employee
+- `DELETE /api/admin/employees/[id]/rates/[rateId]` — remove a rate
+- Each time entry has an optional `rate_id` FK to `employee_rates`
+- The GET `/api/timecard` response includes a `rates` array for the dropdown
+
+### Multiple entries per day
+- `UNIQUE(timecard_id, work_date)` is **removed** — multiple entries per day are allowed
+- `entry_order` (int) tracks order within a day for stable display
+- `POST /api/timecard` always **inserts** (never upserts by date)
+- Use `PATCH /api/timecard/entry/[id]` to update; `DELETE /api/timecard/entry/[id]` to remove
 
 ### Dashboard is a client component
 - `src/app/dashboard/page.tsx` uses `"use client"` — no server-side data fetching
@@ -67,7 +82,7 @@ gh pr create --title "type: description" --fill
 ### Before every PR
 ```bash
 npm run test:coverage  # must pass with ≥90% coverage
-npm run test:e2e       # must pass all 11 Playwright scenarios
+npm run test:e2e       # must pass all 12 Playwright scenarios
 npm run build          # must produce zero TypeScript errors
 ```
 
@@ -110,14 +125,15 @@ await page.route("**/api/timecard**", (route) => {
 ## Database schema summary
 
 ```sql
-pay_periods   id, start_date, end_date, status (open|closed), created_at
-users         id, email, name, image, role (employee|admin), created_at
-timecards     id, employee_id → users, pay_period_id → pay_periods,
-              status (draft|submitted|approved|rejected|sent_to_payroll),
-              rejection_note, submitted_at, approved_at, created_at
-time_entries  id, timecard_id → timecards, work_date, clock_in, clock_out,
-              total_hours, notes, created_at
-              UNIQUE (timecard_id, work_date)
+pay_periods      id, start_date, end_date, status (open|closed), created_at
+users            id, email, name, image, role (employee|admin), created_at
+employee_rates   id, employee_id → users, label, hourly_rate, is_default, created_at
+timecards        id, employee_id → users, pay_period_id → pay_periods,
+                 status (draft|submitted|approved|rejected|sent_to_payroll),
+                 rejection_note, submitted_at, approved_at, created_at
+time_entries     id, timecard_id → timecards, work_date, clock_in, clock_out,
+                 total_hours, notes, rate_id → employee_rates, entry_order, created_at
+                 (no UNIQUE constraint — multiple entries per day allowed)
 ```
 
 ---

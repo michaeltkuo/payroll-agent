@@ -158,52 +158,85 @@ function TimecardCard({ tc, onAction }: TimecardCardProps) {
                   <th className="py-1.5 font-medium">In</th>
                   <th className="py-1.5 font-medium">Out</th>
                   <th className="py-1.5 font-medium">Hours</th>
+                  <th className="py-1.5 font-medium">Rate</th>
                   <th className="py-1.5 font-medium">Notes</th>
                 </tr>
               </thead>
               <tbody>
                 {tc.entries
                   .slice()
-                  .sort((a, b) => a.work_date.localeCompare(b.work_date))
-                  .map((e) => (
-                    <tr key={e.id} className="border-b border-gray-50 dark:border-gray-700/30 last:border-0">
-                      <td className="py-1.5 text-gray-700 dark:text-gray-300">
-                        {new Date(e.work_date + "T00:00:00").toLocaleDateString("en-US", {
-                          weekday: "short",
-                          month: "short",
-                          day: "numeric",
-                        })}
-                      </td>
-                      <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.clock_in?.slice(0, 5) ?? "—"}</td>
-                      <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.clock_out?.slice(0, 5) ?? "—"}</td>
-                      <td className="py-1.5 text-gray-700 dark:text-gray-300">
-                        {e.total_hours !== null ? Number(e.total_hours).toFixed(2) : "—"}
-                      </td>
-                      <td className="py-1.5 text-gray-500 dark:text-gray-400 text-xs">{e.notes ?? ""}</td>
-                    </tr>
-                  ))}
+                  .sort((a, b) => {
+                    const dateDiff = a.work_date.localeCompare(b.work_date);
+                    return dateDiff !== 0 ? dateDiff : (a.entry_order ?? 0) - (b.entry_order ?? 0);
+                  })
+                  .map((e, idx, arr) => {
+                    const showDate = idx === 0 || arr[idx - 1].work_date !== e.work_date;
+                    return (
+                      <tr key={e.id} className="border-b border-gray-50 dark:border-gray-700/30 last:border-0">
+                        <td className="py-1.5 text-gray-700 dark:text-gray-300">
+                          {showDate
+                            ? new Date(e.work_date + "T00:00:00").toLocaleDateString("en-US", {
+                                weekday: "short",
+                                month: "short",
+                                day: "numeric",
+                              })
+                            : ""}
+                        </td>
+                        <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.clock_in?.slice(0, 5) ?? "—"}</td>
+                        <td className="py-1.5 text-gray-600 dark:text-gray-400">{e.clock_out?.slice(0, 5) ?? "—"}</td>
+                        <td className="py-1.5 text-gray-700 dark:text-gray-300">
+                          {e.total_hours !== null ? Number(e.total_hours).toFixed(2) : "—"}
+                        </td>
+                        <td className="py-1.5 text-gray-600 dark:text-gray-400 text-xs">
+                          {e.rate ? `${e.rate.label} ($${e.rate.hourly_rate}/hr)` : "—"}
+                        </td>
+                        <td className="py-1.5 text-gray-500 dark:text-gray-400 text-xs">{e.notes ?? ""}</td>
+                      </tr>
+                    );
+                  })}
               </tbody>
             </table>
+
+            {/* Dollar breakdown */}
+            {tc.entries.some((e) => e.rate) && (() => {
+              const breakdown = new Map<string, { label: string; hours: number; rate: number }>();
+              for (const e of tc.entries) {
+                if (!e.rate || !e.total_hours) continue;
+                const key = e.rate.id;
+                if (!breakdown.has(key)) breakdown.set(key, { label: e.rate.label, hours: 0, rate: e.rate.hourly_rate });
+                breakdown.get(key)!.hours += Number(e.total_hours);
+              }
+              const total = Array.from(breakdown.values()).reduce((s, b) => s + b.hours * b.rate, 0);
+              return (
+                <div data-testid="admin-dollar-breakdown" className="mb-4 rounded-lg bg-gray-50 dark:bg-gray-800 px-4 py-3 text-sm">
+                  <p className="font-medium text-gray-700 dark:text-gray-300 mb-1">Pay Breakdown</p>
+                  {Array.from(breakdown.values()).map((b) => (
+                    <div key={b.label} className="flex justify-between text-gray-600 dark:text-gray-400">
+                      <span>{b.label} — {b.hours.toFixed(2)} hrs × ${b.rate.toFixed(2)}/hr</span>
+                      <span>${(b.hours * b.rate).toFixed(2)}</span>
+                    </div>
+                  ))}
+                  <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700 flex justify-between font-semibold text-gray-800 dark:text-gray-200">
+                    <span>Estimated Total</span>
+                    <span>${total.toFixed(2)}</span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {tc.status === "rejected" && tc.rejection_note && (
               <p className="text-sm text-red-600 dark:text-red-400 mb-3">
                 <strong>Rejection note:</strong> {tc.rejection_note}
               </p>
             )}
-
             {tc.status === "submitted" && (
               <div className="flex gap-3">
-                <button
-                  onClick={handleApprove}
-                  disabled={approving}
-                  className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
-                >
+                <button onClick={handleApprove} disabled={approving}
+                  className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50 transition-colors">
                   {approving ? "Approving…" : "✓ Approve"}
                 </button>
-                <button
-                  onClick={() => setRejectOpen(true)}
-                  className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-4 py-2 text-sm font-medium text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
-                >
+                <button onClick={() => setRejectOpen(true)}
+                  className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-4 py-2 text-sm font-medium text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors">
                   ✕ Reject
                 </button>
               </div>

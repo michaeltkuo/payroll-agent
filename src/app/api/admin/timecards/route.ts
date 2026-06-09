@@ -20,7 +20,7 @@ export async function GET() {
       *,
       employee:users(*),
       pay_period:pay_periods(*),
-      entries:time_entries(*)
+      entries:time_entries(*, rate:employee_rates(*))
     `
     )
     .in("status", ["submitted", "approved", "rejected", "sent_to_payroll"])

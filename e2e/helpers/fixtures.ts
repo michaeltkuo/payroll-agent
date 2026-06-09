@@ -96,7 +96,13 @@ export const mockEntriesComplete = [
 export function timecardResponse(
   timecard: Record<string, unknown>,
   pay_period: Record<string, unknown>,
-  entries: Record<string, unknown>[] = []
+  entries: Record<string, unknown>[] = [],
+  rates: Record<string, unknown>[] = []
 ) {
-  return { timecard, entries, pay_period };
+  return { timecard, entries, pay_period, rates };
 }
+
+export const mockRatesStandard = [
+  { id: "rate-1", employee_id: "user-uuid", label: "Standard", hourly_rate: 50, is_default: true, created_at: "" },
+  { id: "rate-2", employee_id: "user-uuid", label: "Events", hourly_rate: 75, is_default: false, created_at: "" },
+];
