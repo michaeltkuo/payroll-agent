@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import type { TimecardWithEntries } from "@/types";
+import type { TimecardWithEntries, EmployeeRate } from "@/types";
+import type { EmployeeWithRates } from "@/app/api/admin/employees/route";
+
+// ── Constants ──────────────────────────────────────────────────────────────
 
 const STATUS_COLORS: Record<string, string> = {
   submitted: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
@@ -17,6 +20,8 @@ const STATUS_LABELS: Record<string, string> = {
   sent_to_payroll: "Sent to Payroll",
 };
 
+type Tab = "review" | "approved" | "users";
+
 function formatDate(iso: string) {
   return new Date(iso + "T00:00:00").toLocaleDateString("en-US", {
     month: "short",
@@ -28,6 +33,8 @@ function formatDate(iso: string) {
 function totalHoursForTimecard(tc: TimecardWithEntries) {
   return tc.entries.reduce((sum, e) => sum + (e.total_hours ?? 0), 0);
 }
+
+// ── RejectModal ────────────────────────────────────────────────────────────
 
 interface RejectModalProps {
   timecardId: string;
@@ -84,12 +91,15 @@ function RejectModal({ timecardId, onClose, onRejected }: RejectModalProps) {
   );
 }
 
+// ── TimecardCard ───────────────────────────────────────────────────────────
+
 interface TimecardCardProps {
   tc: TimecardWithEntries;
-  onAction: () => void;
+  onAction?: () => void;
+  readonly?: boolean;
 }
 
-function TimecardCard({ tc, onAction }: TimecardCardProps) {
+function TimecardCard({ tc, onAction, readonly = false }: TimecardCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [approving, setApproving] = useState(false);
@@ -98,7 +108,7 @@ function TimecardCard({ tc, onAction }: TimecardCardProps) {
     setApproving(true);
     const res = await fetch(`/api/admin/timecards/${tc.id}/approve`, { method: "POST" });
     setApproving(false);
-    if (res.ok) onAction();
+    if (res.ok && onAction) onAction();
   };
 
   const total = totalHoursForTimecard(tc);
@@ -111,12 +121,11 @@ function TimecardCard({ tc, onAction }: TimecardCardProps) {
           onClose={() => setRejectOpen(false)}
           onRejected={() => {
             setRejectOpen(false);
-            onAction();
+            if (onAction) onAction();
           }}
         />
       )}
       <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm overflow-hidden">
-        {/* Card header */}
         <div
           className="flex items-center justify-between px-5 py-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
           onClick={() => setExpanded((v) => !v)}
@@ -148,7 +157,6 @@ function TimecardCard({ tc, onAction }: TimecardCardProps) {
           </div>
         </div>
 
-        {/* Expanded entries */}
         {expanded && (
           <div className="border-t border-gray-100 dark:border-gray-700/50 px-5 py-4">
             <table className="w-full text-sm mb-4">
@@ -197,7 +205,6 @@ function TimecardCard({ tc, onAction }: TimecardCardProps) {
               </tbody>
             </table>
 
-            {/* Dollar breakdown */}
             {tc.entries.some((e) => e.rate) && (() => {
               const breakdown = new Map<string, { label: string; hours: number; rate: number }>();
               for (const e of tc.entries) {
@@ -229,7 +236,7 @@ function TimecardCard({ tc, onAction }: TimecardCardProps) {
                 <strong>Rejection note:</strong> {tc.rejection_note}
               </p>
             )}
-            {tc.status === "submitted" && (
+            {!readonly && tc.status === "submitted" && (
               <div className="flex gap-3">
                 <button onClick={handleApprove} disabled={approving}
                   className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50 transition-colors">
@@ -248,30 +255,268 @@ function TimecardCard({ tc, onAction }: TimecardCardProps) {
   );
 }
 
+// ── EmployeeRateRow ────────────────────────────────────────────────────────
+
+interface EmployeeRateRowProps {
+  rate: EmployeeRate;
+  onDeleted: () => void;
+}
+
+function EmployeeRateRow({ rate, onDeleted }: EmployeeRateRowProps) {
+  const [deleting, setDeleting] = useState(false);
+
+  const handleDelete = async () => {
+    if (!confirm(`Delete rate "${rate.label}"?`)) return;
+    setDeleting(true);
+    const res = await fetch(`/api/admin/employees/${rate.employee_id}/rates/${rate.id}`, {
+      method: "DELETE",
+    });
+    setDeleting(false);
+    if (res.ok) onDeleted();
+  };
+
+  return (
+    <div className="flex items-center justify-between rounded-lg bg-gray-50 dark:bg-gray-800 px-4 py-3">
+      <div className="flex items-center gap-3">
+        <div>
+          <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{rate.label}</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400">${Number(rate.hourly_rate).toFixed(2)} / hr</p>
+        </div>
+        {rate.is_default && (
+          <span className="rounded-full bg-indigo-100 dark:bg-indigo-900/50 text-indigo-700 dark:text-indigo-300 text-xs px-2 py-0.5">
+            Default
+          </span>
+        )}
+      </div>
+      <button
+        onClick={handleDelete}
+        disabled={deleting}
+        data-testid={`delete-rate-${rate.id}`}
+        className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors disabled:opacity-40 text-base"
+        title="Delete rate"
+      >
+        🗑
+      </button>
+    </div>
+  );
+}
+
+// ── EmployeeCard ───────────────────────────────────────────────────────────
+
+interface EmployeeCardProps {
+  employee: EmployeeWithRates;
+  onRatesChanged: () => void;
+}
+
+function EmployeeCard({ employee, onRatesChanged }: EmployeeCardProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [label, setLabel] = useState("");
+  const [hourlyRate, setHourlyRate] = useState("");
+  const [isDefault, setIsDefault] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleAdd = async () => {
+    setError(null);
+    const rate = parseFloat(hourlyRate);
+    if (!label.trim() || isNaN(rate) || rate <= 0) {
+      setError("Label and a positive $/hr are required.");
+      return;
+    }
+    setAdding(true);
+    const res = await fetch(`/api/admin/employees/${employee.id}/rates`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: label.trim(), hourly_rate: rate, is_default: isDefault }),
+    });
+    setAdding(false);
+    if (res.ok) {
+      setLabel("");
+      setHourlyRate("");
+      setIsDefault(false);
+      onRatesChanged();
+    } else {
+      const json = await res.json() as { error?: string };
+      setError(json.error ?? "Failed to add rate.");
+    }
+  };
+
+  const initials = (employee.name ?? employee.email)
+    .split(" ")
+    .map((p) => p[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+  return (
+    <div className="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm overflow-hidden">
+      <div
+        className="flex items-center justify-between px-5 py-4 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+        onClick={() => setExpanded((v) => !v)}
+        data-testid={`employee-row-${employee.id}`}
+      >
+        <div className="flex items-center gap-3">
+          {employee.image ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={employee.image} alt={employee.name ?? ""} className="w-10 h-10 rounded-full object-cover" />
+          ) : (
+            <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-bold text-white">
+              {initials}
+            </div>
+          )}
+          <div>
+            <p className="font-medium text-gray-900 dark:text-gray-100">{employee.name ?? "—"}</p>
+            <p className="text-xs text-gray-500 dark:text-gray-400">{employee.email}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
+            {employee.rates.length} {employee.rates.length === 1 ? "rate" : "rates"}
+          </span>
+          <span className="text-gray-400 dark:text-gray-500 text-xs">{expanded ? "▲" : "▼"}</span>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-gray-100 dark:border-gray-700/50 px-5 py-4">
+          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-3">
+            Rate Profiles
+          </p>
+
+          {employee.rates.length === 0 ? (
+            <p className="text-sm text-gray-400 dark:text-gray-500 mb-4 italic">No rates configured yet.</p>
+          ) : (
+            <div className="space-y-2 mb-5">
+              {employee.rates.map((r) => (
+                <EmployeeRateRow key={r.id} rate={r} onDeleted={onRatesChanged} />
+              ))}
+            </div>
+          )}
+
+          <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 dark:text-gray-400 mb-2">
+            Add Rate
+          </p>
+          <div className="flex items-end gap-3 flex-wrap">
+            <div>
+              <label className="text-xs text-gray-500 dark:text-gray-400 block mb-1">Label</label>
+              <input
+                type="text"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="e.g. Regular"
+                data-testid={`rate-label-input-${employee.id}`}
+                className="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm px-3 py-2 w-44 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-gray-500 dark:text-gray-400 block mb-1">$/hr</label>
+              <input
+                type="number"
+                value={hourlyRate}
+                onChange={(e) => setHourlyRate(e.target.value)}
+                placeholder="0.00"
+                min="0"
+                step="0.01"
+                data-testid={`rate-amount-input-${employee.id}`}
+                className="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm px-3 py-2 w-28 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+            </div>
+            <div className="flex items-center gap-2 pb-2">
+              <input
+                type="checkbox"
+                id={`default-${employee.id}`}
+                checked={isDefault}
+                onChange={(e) => setIsDefault(e.target.checked)}
+                className="rounded"
+              />
+              <label htmlFor={`default-${employee.id}`} className="text-xs text-gray-500 dark:text-gray-400">
+                Set as default
+              </label>
+            </div>
+            <button
+              onClick={handleAdd}
+              disabled={adding}
+              data-testid={`add-rate-btn-${employee.id}`}
+              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            >
+              {adding ? "Adding…" : "+ Add"}
+            </button>
+          </div>
+          {error && <p className="mt-2 text-xs text-red-500 dark:text-red-400">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ManageUsersTab ─────────────────────────────────────────────────────────
+
+interface ManageUsersTabProps {
+  employees: EmployeeWithRates[];
+  loading: boolean;
+  onRatesChanged: () => void;
+}
+
+function ManageUsersTab({ employees, loading, onRatesChanged }: ManageUsersTabProps) {
+  if (loading) return <p className="text-gray-400 dark:text-gray-500">Loading…</p>;
+  if (employees.length === 0)
+    return <p className="text-gray-500 dark:text-gray-400">No employees found.</p>;
+
+  return (
+    <div className="space-y-3" data-testid="manage-users-panel">
+      {employees.map((emp) => (
+        <EmployeeCard key={emp.id} employee={emp} onRatesChanged={onRatesChanged} />
+      ))}
+    </div>
+  );
+}
+
+// ── AdminPage (root) ───────────────────────────────────────────────────────
+
 export default function AdminPage() {
+  const [activeTab, setActiveTab] = useState<Tab>("review");
   const [timecards, setTimecards] = useState<TimecardWithEntries[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [employees, setEmployees] = useState<EmployeeWithRates[]>([]);
+  const [loadingTimecards, setLoadingTimecards] = useState(true);
+  const [loadingEmployees, setLoadingEmployees] = useState(true);
   const [forbidden, setForbidden] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const loadTimecards = useCallback(async () => {
+    setLoadingTimecards(true);
     const res = await fetch("/api/admin/timecards");
     if (res.status === 403) {
       setForbidden(true);
-      setLoading(false);
+      setLoadingTimecards(false);
       return;
     }
     if (res.ok) {
       const json = (await res.json()) as { timecards: TimecardWithEntries[] };
       setTimecards(json.timecards);
     }
-    setLoading(false);
+    setLoadingTimecards(false);
+  }, []);
+
+  const loadEmployees = useCallback(async () => {
+    setLoadingEmployees(true);
+    const res = await fetch("/api/admin/employees");
+    if (res.ok) {
+      const json = (await res.json()) as { employees: EmployeeWithRates[] };
+      setEmployees(json.employees);
+    }
+    setLoadingEmployees(false);
   }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    load();
-  }, [load]);
+    loadTimecards();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadEmployees();
+  }, [loadTimecards, loadEmployees]);
+
+  const handleRefresh = () => {
+    loadTimecards();
+    loadEmployees();
+  };
 
   if (forbidden) {
     return (
@@ -281,51 +526,87 @@ export default function AdminPage() {
     );
   }
 
-  const groups: Record<string, TimecardWithEntries[]> = {
-    submitted: [],
-    approved: [],
-    rejected: [],
-    sent_to_payroll: [],
-  };
-  for (const tc of timecards) {
-    if (groups[tc.status]) groups[tc.status].push(tc);
-  }
+  const toReview = timecards.filter((tc) => tc.status === "submitted");
+  const approved = timecards.filter((tc) => tc.status === "approved" || tc.status === "sent_to_payroll");
+
+  const TAB_CONFIG: { id: Tab; label: string; badge?: number }[] = [
+    { id: "review", label: "To Review", badge: toReview.length || undefined },
+    { id: "approved", label: "Approved" },
+    { id: "users", label: "Manage Users" },
+  ];
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
+      {/* Page header */}
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Admin — Timecards</h1>
-        <button
-          onClick={load}
-          className="text-sm text-indigo-600 hover:underline"
-        >
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Admin</h1>
+        <button onClick={handleRefresh} className="text-sm text-indigo-600 hover:underline">
           Refresh
         </button>
       </div>
 
-      {loading ? (
-        <p className="text-gray-400 dark:text-gray-500">Loading…</p>
-      ) : timecards.length === 0 ? (
-        <p className="text-gray-500 dark:text-gray-400">No timecards to review.</p>
-      ) : (
-        <div className="space-y-8">
-          {(["submitted", "approved", "rejected", "sent_to_payroll"] as const).map((status) => {
-            const group = groups[status];
-            if (!group || group.length === 0) return null;
-            return (
-              <section key={status}>
-                <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-3">
-                  {STATUS_LABELS[status]} ({group.length})
-                </h2>
-                <div className="space-y-3">
-                  {group.map((tc) => (
-                    <TimecardCard key={tc.id} tc={tc} onAction={load} />
-                  ))}
-                </div>
-              </section>
-            );
-          })}
+      {/* Tab bar */}
+      <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700 mb-8" data-testid="admin-tabs">
+        {TAB_CONFIG.map(({ id, label, badge }) => (
+          <button
+            key={id}
+            data-testid={`tab-${id}`}
+            onClick={() => setActiveTab(id)}
+            className={`px-5 py-2.5 text-sm font-medium rounded-t-lg transition-colors ${
+              activeTab === id
+                ? "bg-white dark:bg-gray-800 text-gray-900 dark:text-white border-b-2 border-indigo-500 -mb-px"
+                : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+            }`}
+          >
+            {label}
+            {badge != null && badge > 0 && (
+              <span className="ml-1.5 rounded-full bg-blue-600 text-white text-xs px-1.5 py-0.5">
+                {badge}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab panels */}
+      {activeTab === "review" && (
+        <div data-testid="panel-review">
+          {loadingTimecards ? (
+            <p className="text-gray-400 dark:text-gray-500">Loading…</p>
+          ) : toReview.length === 0 ? (
+            <p className="text-gray-500 dark:text-gray-400">No timecards awaiting review.</p>
+          ) : (
+            <div className="space-y-3">
+              {toReview.map((tc) => (
+                <TimecardCard key={tc.id} tc={tc} onAction={loadTimecards} />
+              ))}
+            </div>
+          )}
         </div>
+      )}
+
+      {activeTab === "approved" && (
+        <div data-testid="panel-approved">
+          {loadingTimecards ? (
+            <p className="text-gray-400 dark:text-gray-500">Loading…</p>
+          ) : approved.length === 0 ? (
+            <p className="text-gray-500 dark:text-gray-400">No approved timecards.</p>
+          ) : (
+            <div className="space-y-3">
+              {approved.map((tc) => (
+                <TimecardCard key={tc.id} tc={tc} readonly />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "users" && (
+        <ManageUsersTab
+          employees={employees}
+          loading={loadingEmployees}
+          onRatesChanged={loadEmployees}
+        />
       )}
     </div>
   );
