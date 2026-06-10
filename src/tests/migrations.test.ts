@@ -23,8 +23,8 @@ describe("supabase migrations", () => {
           .sort()
       : [];
 
-    it.each(files)("%s: follows NNN_name.sql naming convention", (file) => {
-      expect(file).toMatch(/^\d{3,}_[a-z0-9_]+\.sql$/);
+    it.each(files)("%s: follows Supabase timestamp naming convention (YYYYMMDDHHmmss_name.sql)", (file) => {
+      expect(file).toMatch(/^\d{14}_[a-z0-9_]+\.sql$/);
     });
 
     it.each(files)("%s: uses IF NOT EXISTS or IF EXISTS guards", (file) => {

@@ -45,17 +45,17 @@ npm run lint          # ESLint
 ## CI/CD Pipeline
 
 ```
-Push/PR → GitHub Actions (Tests job) → merge to main → DB Migrate job → Vercel deploys
+Push/PR → GitHub Actions (Tests) → merge to main → Supabase applies migrations → Vercel deploys
 ```
 
 - **Tests CI** (`ci.yml`) — runs `npm run test:coverage` then `npx playwright test` on every push/PR
-- **DB Migrate** (`db-migrate.yml`) — runs all migration files in `supabase/migrations/` against production on every merge to main
+- **DB Migrations** — handled natively by the **Supabase GitHub Integration** (Project Settings → Integrations → GitHub). On every merge to `main`, Supabase runs `supabase db push` against production automatically — no secrets or workflow file needed.
+- **Vercel env vars** — kept in sync automatically by the **Supabase Vercel Integration**. No need to manually update Vercel when Supabase keys change.
 - **Branch protection**: `main` requires the `Tests` check to pass before merge
-- **Vercel** auto-deploys `main` on every merge; also creates Preview Deployments for PRs
 
 ### Required GitHub Secrets
 
-Add these in **Repo → Settings → Secrets and variables → Actions**:
+Add these in **Repo → Settings → Secrets and variables → Actions** (used only by the `Tests` CI job):
 
 | Secret | Where to find it |
 |---|---|
@@ -63,10 +63,6 @@ Add these in **Repo → Settings → Secrets and variables → Actions**:
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase Dashboard → Project Settings → API |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase Dashboard → Project Settings → API |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase Dashboard → Project Settings → API |
-| `SUPABASE_DB_URL` | Supabase Dashboard → Project Settings → Database → Connection string → URI |
-
-> **`SUPABASE_DB_URL` format**: `postgresql://postgres:[password]@db.[project-ref].supabase.co:5432/postgres`
-> Used only by the `Migrate DB` GitHub Actions job to apply schema migrations.
 
 ---
 
@@ -111,16 +107,17 @@ supabase/
 
 ## Database Migrations
 
-Schema changes are tracked as numbered SQL files in `supabase/migrations/`. Each file is safe to re-run (uses `IF NOT EXISTS` / `IF EXISTS` guards).
+Schema changes are tracked as timestamped SQL files in `supabase/migrations/`. The **Supabase GitHub Integration** automatically applies them to production on every merge to `main` — no manual steps needed.
 
-### Applying migrations to a Supabase project
+Each file is safe to re-run (uses `IF NOT EXISTS` / `IF EXISTS` guards).
 
-Paste the relevant migration file(s) into the **Supabase SQL Editor** for your project and run them. They are idempotent — running the same file twice is safe.
+### How migrations are applied
 
-**Production:**
-```
-Supabase Dashboard → your project → SQL Editor → paste & run
-```
+**Automatically (production):**  
+Merge to `main` → Supabase GitHub Integration runs `supabase db push` → done.
+
+**Manually (if needed):**  
+Paste the file into **Supabase Dashboard → SQL Editor** and run it.
 
 **Local dev** (if using Supabase CLI):
 ```bash
@@ -129,17 +126,18 @@ supabase db push
 
 ### Writing a new migration
 
-1. Add a file: `supabase/migrations/NNN_short_description.sql`
-   - `NNN` is the next sequential number (`002`, `003`, …)
+1. Add a file: `supabase/migrations/YYYYMMDDHHmmss_short_description.sql`
+   - Use the current UTC timestamp as the prefix (e.g. `20260615120000_add_column.sql`)
+   - This is the format Supabase CLI expects for migration tracking
 2. Use `IF NOT EXISTS` / `IF EXISTS` / `ADD COLUMN IF NOT EXISTS` so the file is safe to re-run
 3. Include a comment at the top with the date, context, and what it changes
 4. Update `supabase/schema.sql` to reflect the new full schema state
 
 ### Migration history
 
-| # | File | Description |
-|---|------|-------------|
-| 001 | `001_add_rates_and_multi_entry.sql` | Add `employee_rates` table; add `rate_id` + `entry_order` to `time_entries`; drop one-entry-per-day unique constraint |
+| File | Description |
+|------|-------------|
+| `20260609000000_add_rates_and_multi_entry.sql` | Add `employee_rates` table; add `rate_id` + `entry_order` to `time_entries`; drop one-entry-per-day unique constraint |
 
 ---
 
