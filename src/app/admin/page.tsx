@@ -509,7 +509,6 @@ export default function AdminPage() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadTimecards();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadEmployees();
   }, [loadTimecards, loadEmployees]);
 
