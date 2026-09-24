@@ -6,6 +6,8 @@ create table if not exists users (
   image text,
   role text not null default 'employee', -- 'employee' | 'admin'
   employee_number text,
+  pay_frequency text not null default 'weekly'
+    check (pay_frequency in ('weekly', 'semi_monthly', 'monthly')),
   created_at timestamptz default now()
 );
 
@@ -19,12 +21,16 @@ create table if not exists employee_rates (
   created_at timestamptz default now()
 );
 
--- Pay periods (weekly, Sun–Sat)
+-- Pay periods (bounds depend on the employee's pay_frequency: weekly is
+-- Sun–Sat, semi_monthly is 1st–15th / 16th–end-of-month, monthly is
+-- 1st–end-of-month)
 create table if not exists pay_periods (
   id uuid primary key default gen_random_uuid(),
   start_date date not null,
   end_date date not null,
   status text not null default 'open', -- 'open' | 'closed'
+  frequency text not null default 'weekly'
+    check (frequency in ('weekly', 'semi_monthly', 'monthly')),
   created_at timestamptz default now()
 );
 
@@ -66,4 +72,15 @@ create table if not exists payroll_submissions (
   status text not null default 'pending', -- 'pending' | 'success' | 'failed'
   error_message text,
   attempted_at timestamptz default now()
+);
+
+-- In-app notifications (e.g. timecard approved/rejected)
+create table if not exists notifications (
+  id uuid primary key default gen_random_uuid(),
+  recipient_user_id uuid references users(id) not null,
+  type text not null,
+  timecard_id uuid references timecards(id) on delete cascade not null,
+  message text not null,
+  read_at timestamptz,
+  created_at timestamptz not null default now()
 );

@@ -28,6 +28,14 @@ import {
   PREV_WEEK_LABEL,
   CURRENT_WEEK_MONDAY,
   PREV_WEEK_MONDAY,
+  semiMonthlyTimecardResponse,
+  mockPayPeriodCurrentSemi,
+  mockPayPeriodPrevSemi,
+  mockTimecardDraftSemi,
+  CURRENT_SEMI_LABEL,
+  PREV_SEMI_LABEL,
+  SEMI_PREV_NAV_REF_DATE,
+  SEMI_NEXT_NAV_REF_DATE,
 } from "./helpers/fixtures";
 
 const TEST_USER = { email: "employee@example.com", name: "Test Employee", role: "employee" as const };
@@ -572,4 +580,76 @@ test("null pay period status: draft timecard is editable (pre-migration rows)", 
   await page.getByTestId(`add-entry-${CURRENT_WEEK_MONDAY}`).click();
   await addEntryResponse13;
   await expect(page.locator('input[type="time"]').first()).toBeVisible();
+});
+
+// ---------------------------------------------------------------------------
+// Semi-monthly pay frequency
+// ---------------------------------------------------------------------------
+
+// 14. Semi-monthly employee: dashboard shows a half-month range, not a week
+test("semi-monthly: dashboard shows half-month period range for the current period", async ({ page }) => {
+  const draftPayload = semiMonthlyTimecardResponse(mockTimecardDraftSemi, mockPayPeriodCurrentSemi, []);
+  await mockTimecardGet(page, draftPayload);
+
+  await page.goto("/dashboard");
+  await page.waitForSelector("table");
+
+  // "This period" (not "This week") marks the current semi-monthly period
+  await expect(page.getByText("This period")).toBeVisible();
+  await expect(page.getByText("This week")).not.toBeVisible();
+  await expect(page.getByTestId("week-nav-label")).toContainText(CURRENT_SEMI_LABEL);
+
+  // Forward nav is blocked on the current period, same as the weekly case
+  await expect(page.getByRole("button", { name: /next period/i })).toBeDisabled();
+});
+
+// 15. Semi-monthly employee: previous/next navigation moves between half-month windows
+test("semi-monthly: navigating previous then next moves between adjacent half-month periods", async ({
+  page,
+}) => {
+  const currentPayload = semiMonthlyTimecardResponse(mockTimecardDraftSemi, mockPayPeriodCurrentSemi, []);
+  const prevPayload = semiMonthlyTimecardResponse(
+    { ...mockTimecardDraftSemi, id: "tc-prev-draft-semi", pay_period_id: "pp-prev-semi" },
+    mockPayPeriodPrevSemi,
+    []
+  );
+
+  await mockTimecardGetByWeek(page, {
+    default: currentPayload,
+    [SEMI_PREV_NAV_REF_DATE]: prevPayload,
+    [SEMI_NEXT_NAV_REF_DATE]: currentPayload,
+  });
+
+  await page.goto("/dashboard");
+  await page.waitForSelector("table");
+
+  await expect(page.getByText("This period")).toBeVisible();
+
+  // ← moves to the previous half-month window
+  const prevResponse = page.waitForResponse(
+    (res) =>
+      res.url().includes("/api/timecard") &&
+      !res.url().includes("submit") &&
+      new URL(res.url()).searchParams.get("week") === SEMI_PREV_NAV_REF_DATE
+  );
+  await page.getByRole("button", { name: /previous period/i }).click();
+  await prevResponse;
+
+  await expect(page.getByText("This period")).not.toBeVisible();
+  await expect(page.getByTestId("week-nav-label")).toContainText(PREV_SEMI_LABEL);
+  await expect(page.getByRole("button", { name: /next period/i })).toBeEnabled();
+
+  // → moves back to the current half-month window
+  const nextResponse = page.waitForResponse(
+    (res) =>
+      res.url().includes("/api/timecard") &&
+      !res.url().includes("submit") &&
+      new URL(res.url()).searchParams.get("week") === SEMI_NEXT_NAV_REF_DATE
+  );
+  await page.getByRole("button", { name: /next period/i }).click();
+  await nextResponse;
+
+  await expect(page.getByText("This period")).toBeVisible();
+  await expect(page.getByTestId("week-nav-label")).toContainText(CURRENT_SEMI_LABEL);
+  await expect(page.getByRole("button", { name: /next period/i })).toBeDisabled();
 });

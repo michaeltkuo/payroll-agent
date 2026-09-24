@@ -1,23 +1,17 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import type { Timecard, TimeEntry, PayPeriod, EmployeeRate } from "@/types";
+import type { Timecard, TimeEntry, PayPeriod, EmployeeRate, PayFrequency } from "@/types";
 import { getWeekStart } from "@/lib/pay-periods";
-
-interface EntryDraft {
-  id: string | null;
-  _tempKey: string;
-  clock_in: string;
-  clock_out: string;
-  notes: string;
-  rate_id: string | null;
-}
+import TimecardEntryTable, { calcHours, type EntryDraft } from "./TimecardEntryTable";
 
 interface DashboardData {
   timecard: Timecard;
   entries: TimeEntry[];
   pay_period: PayPeriod;
   rates: EmployeeRate[];
+  /** Absent on older responses — treated the same as "weekly". */
+  pay_frequency?: PayFrequency;
 }
 
 const STATUS_LABELS: Record<Timecard["status"], string> = {
@@ -36,14 +30,6 @@ const STATUS_COLORS: Record<Timecard["status"], string> = {
   sent_to_payroll: "bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300",
 };
 
-function formatDate(iso: string) {
-  return new Date(iso + "T00:00:00").toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
-}
-
 function formatWeekLabel(iso: string) {
   return new Date(iso + "T00:00:00").toLocaleDateString("en-US", {
     month: "short",
@@ -51,12 +37,25 @@ function formatWeekLabel(iso: string) {
   });
 }
 
-function calcHours(clockIn: string, clockOut: string): number | null {
-  if (!clockIn || !clockOut) return null;
-  const [ih, im] = clockIn.split(":").map(Number);
-  const [oh, om] = clockOut.split(":").map(Number);
-  const diff = (oh * 60 + om - (ih * 60 + im)) / 60;
-  return diff > 0 ? Math.round(diff * 100) / 100 : null;
+/** e.g. "Sep 1 – Sep 15, 2026" — used for the semi-monthly nav label. */
+function formatPeriodLabel(startIso: string, endIso: string) {
+  const start = new Date(startIso + "T00:00:00").toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+  const end = new Date(endIso + "T00:00:00").toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  return `${start} – ${end}`;
+}
+
+/** Adds `delta` calendar days to an ISO (YYYY-MM-DD) date string. */
+function addDaysToISO(iso: string, delta: number): string {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + delta);
+  return d.toISOString().slice(0, 10);
 }
 
 function getDaysInPeriod(start: string, end: string): string[] {
@@ -88,6 +87,8 @@ function entriesToDraftMap(entries: TimeEntry[]): Record<string, EntryDraft[]> {
 
 export default function DashboardPage() {
   const [weekOffset, setWeekOffset] = useState(0);
+  /** Semi-monthly equivalent of weekOffset: 0 = current period, -1 = one period back, etc. Unused (stays 0) in weekly mode. */
+  const [periodOffset, setPeriodOffset] = useState(0);
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -133,6 +134,36 @@ export default function DashboardPage() {
     setLocalEntries({});
     setWeekOffset((prev) => prev + direction);
   };
+
+  const isSemiMonthly = data?.pay_frequency === "semi_monthly";
+
+  /**
+   * Semi-monthly navigation: derived from the *server-returned* pay_period bounds of the
+   * currently loaded period, rather than reimplementing the 1st/16th boundary math client-side.
+   * Stepping forward passes a date one day past the current period's end_date (which
+   * parseWeekParam on the server normalizes to the next semi-monthly period); stepping
+   * backward passes a date one day before start_date (normalizes to the previous period).
+   */
+  const navigatePeriod = (direction: -1 | 1) => {
+    if (!data) return;
+    Object.values(saveTimers.current).forEach(clearTimeout);
+    saveTimers.current = {};
+    setLocalEntries({});
+    setPeriodOffset((prev) => prev + direction);
+    const refDate =
+      direction === 1
+        ? addDaysToISO(data.pay_period.end_date, 1)
+        : addDaysToISO(data.pay_period.start_date, -1);
+    load(refDate);
+  };
+
+  /**
+   * The `week` value to send on POST /api/timecard and POST /api/timecard/submit.
+   * In weekly mode this is exactly `weekStartStr` (unchanged). In semi-monthly mode it's the
+   * start_date of whatever period is currently loaded (which may differ from "this week's
+   * Sunday" once the employee has navigated away from the current period).
+   */
+  const activePeriodParam = isSemiMonthly && data ? data.pay_period.start_date : weekStartStr;
 
   const isEditable =
     (data?.timecard.status === "draft" || data?.timecard.status === "rejected") &&
@@ -190,7 +221,7 @@ export default function DashboardPage() {
     const res = await fetch("/api/timecard", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ week: weekStartStr, work_date: day }),
+      body: JSON.stringify({ week: activePeriodParam, work_date: day }),
     });
     if (!res.ok) return;
     const json = (await res.json()) as { entry: TimeEntry };
@@ -232,10 +263,10 @@ export default function DashboardPage() {
     const res = await fetch("/api/timecard/submit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ week: weekStartStr }),
+      body: JSON.stringify({ week: activePeriodParam }),
     });
     if (res.ok) {
-      await load(weekStartStr);
+      await load(activePeriodParam);
     } else {
       const json = (await res.json()) as { error?: string };
       setSubmitError(json.error ?? "Failed to submit");
@@ -295,9 +326,9 @@ export default function DashboardPage() {
           <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">My Timecard</h1>
           <div className="flex items-center gap-1 mt-1">
             <button
-              onClick={() => navigateWeek(-1)}
+              onClick={() => (isSemiMonthly ? navigatePeriod(-1) : navigateWeek(-1))}
               className="rounded p-1 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 transition-colors"
-              aria-label="Previous week"
+              aria-label={isSemiMonthly ? "Previous period" : "Previous week"}
             >
               ←
             </button>
@@ -305,18 +336,31 @@ export default function DashboardPage() {
               data-testid="week-nav-label"
               className="text-sm text-gray-500 dark:text-gray-400 px-1 min-w-[200px] text-center"
             >
-              {weekOffset === 0 && (
-                <span className="font-medium text-indigo-600 dark:text-indigo-400 mr-1">
-                  This week ·
-                </span>
+              {isSemiMonthly ? (
+                <>
+                  {periodOffset === 0 && (
+                    <span className="font-medium text-indigo-600 dark:text-indigo-400 mr-1">
+                      This period ·
+                    </span>
+                  )}
+                  {formatPeriodLabel(pay_period.start_date, pay_period.end_date)}
+                </>
+              ) : (
+                <>
+                  {weekOffset === 0 && (
+                    <span className="font-medium text-indigo-600 dark:text-indigo-400 mr-1">
+                      This week ·
+                    </span>
+                  )}
+                  {formatWeekLabel(pay_period.start_date)} – {formatWeekLabel(pay_period.end_date)}
+                </>
               )}
-              {formatWeekLabel(pay_period.start_date)} – {formatWeekLabel(pay_period.end_date)}
             </p>
             <button
-              onClick={() => navigateWeek(1)}
-              disabled={weekOffset === 0}
+              onClick={() => (isSemiMonthly ? navigatePeriod(1) : navigateWeek(1))}
+              disabled={isSemiMonthly ? periodOffset === 0 : weekOffset === 0}
               className="rounded p-1 hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-              aria-label="Next week"
+              aria-label={isSemiMonthly ? "Next period" : "Next week"}
             >
               →
             </button>
@@ -345,155 +389,16 @@ export default function DashboardPage() {
       )}
 
       {/* Time entry table */}
-      <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-sm">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-left">
-              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-36">Date</th>
-              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-28">Clock In</th>
-              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-28">Clock Out</th>
-              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-16">Hours</th>
-              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400 w-36">Rate</th>
-              <th className="px-4 py-3 font-medium text-gray-600 dark:text-gray-400">Notes</th>
-              {isEditable && <th className="px-4 py-3 w-8" />}
-            </tr>
-          </thead>
-          <tbody>
-            {days.map((day) => {
-              const dayEntries = localEntries[day] ?? [];
-              const isWeekend =
-                new Date(day + "T00:00:00").getDay() === 0 ||
-                new Date(day + "T00:00:00").getDay() === 6;
-              const rowClass = `border-b border-gray-100 dark:border-gray-700/50 last:border-0 ${isWeekend ? "bg-gray-50/60 dark:bg-gray-800/40" : ""}`;
-
-              if (dayEntries.length === 0) {
-                return (
-                  <tr key={day} className={rowClass}>
-                    <td className="px-4 py-2 text-gray-700 dark:text-gray-300 whitespace-nowrap">
-                      {formatDate(day)}
-                    </td>
-                    <td className="px-4 py-2 text-gray-400 dark:text-gray-500">—</td>
-                    <td className="px-4 py-2 text-gray-400 dark:text-gray-500">—</td>
-                    <td className="px-4 py-2 text-gray-400 dark:text-gray-500">—</td>
-                    <td className="px-4 py-2 text-gray-400 dark:text-gray-500">—</td>
-                    <td className="px-4 py-2" />
-                    {isEditable && (
-                      <td className="px-4 py-2">
-                        <button
-                          data-testid={`add-entry-${day}`}
-                          onClick={() => handleAddEntry(day)}
-                          className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline whitespace-nowrap"
-                        >
-                          + Add
-                        </button>
-                      </td>
-                    )}
-                  </tr>
-                );
-              }
-
-              return dayEntries.map((entry, idx) => (
-                <tr key={entry._tempKey} className={rowClass}>
-                  <td className="px-4 py-2 text-gray-700 dark:text-gray-300 whitespace-nowrap">
-                    {idx === 0 ? formatDate(day) : ""}
-                  </td>
-                  <td className="px-4 py-2">
-                    {isEditable ? (
-                      <input
-                        type="time"
-                        data-testid={`clock-in-${entry._tempKey}`}
-                        value={entry.clock_in}
-                        onChange={(e) => handleFieldChange(day, entry._tempKey, "clock_in", e.target.value)}
-                        onBlur={() => handleBlur(day, entry._tempKey)}
-                        className="w-full rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 dark:text-gray-100 px-2 py-1 text-sm focus:border-indigo-400 dark:focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                      />
-                    ) : (
-                      <span className="text-gray-600 dark:text-gray-400">{entry.clock_in || "—"}</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2">
-                    {isEditable ? (
-                      <input
-                        type="time"
-                        data-testid={`clock-out-${entry._tempKey}`}
-                        value={entry.clock_out}
-                        onChange={(e) => handleFieldChange(day, entry._tempKey, "clock_out", e.target.value)}
-                        onBlur={() => handleBlur(day, entry._tempKey)}
-                        className="w-full rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 dark:text-gray-100 px-2 py-1 text-sm focus:border-indigo-400 dark:focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                      />
-                    ) : (
-                      <span className="text-gray-600 dark:text-gray-400">{entry.clock_out || "—"}</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2 text-gray-700 dark:text-gray-300">
-                    {calcHours(entry.clock_in, entry.clock_out)?.toFixed(2) ?? "—"}
-                  </td>
-                  <td className="px-4 py-2">
-                    {isEditable ? (
-                      <select
-                        data-testid={`rate-select-${entry._tempKey}`}
-                        value={entry.rate_id ?? ""}
-                        onChange={(e) => handleFieldChange(day, entry._tempKey, "rate_id", e.target.value || null)}
-                        onBlur={() => handleBlur(day, entry._tempKey)}
-                        className="w-full rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 dark:text-gray-100 px-2 py-1 text-sm focus:border-indigo-400 dark:focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                      >
-                        <option value="">— select rate —</option>
-                        {rates.map((r) => (
-                          <option key={r.id} value={r.id}>
-                            {r.label} (${r.hourly_rate}/hr)
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className="text-gray-600 dark:text-gray-400 text-xs">
-                        {entry.rate_id ? (rateMap.get(entry.rate_id)?.label ?? "—") : "—"}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-2">
-                    {isEditable ? (
-                      <input
-                        type="text"
-                        placeholder="optional"
-                        data-testid={`notes-${entry._tempKey}`}
-                        value={entry.notes}
-                        onChange={(e) => handleFieldChange(day, entry._tempKey, "notes", e.target.value)}
-                        onBlur={() => handleBlur(day, entry._tempKey)}
-                        className="w-full rounded border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 dark:text-gray-100 px-2 py-1 text-sm focus:border-indigo-400 dark:focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-                      />
-                    ) : (
-                      <span className="text-gray-500 dark:text-gray-400 text-xs">{entry.notes || ""}</span>
-                    )}
-                  </td>
-                  {isEditable && (
-                    <td className="px-4 py-2">
-                      <div className="flex flex-col gap-1">
-                        {idx === dayEntries.length - 1 && (
-                          <button
-                            data-testid={`add-entry-${day}`}
-                            onClick={() => handleAddEntry(day)}
-                            className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline whitespace-nowrap"
-                          >
-                            + Add
-                          </button>
-                        )}
-                        <button
-                          data-testid={`delete-entry-${entry._tempKey}`}
-                          onClick={() => handleDeleteEntry(day, entry._tempKey)}
-                          className="text-xs text-red-500 dark:text-red-400 hover:underline"
-                          aria-label="Remove entry"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </td>
-                  )}
-                </tr>
-              ));
-            })}
-          </tbody>
-        </table>
-      </div>
+      <TimecardEntryTable
+        days={days}
+        localEntries={localEntries}
+        rates={rates}
+        isEditable={isEditable}
+        onFieldChange={handleFieldChange}
+        onBlur={handleBlur}
+        onAddEntry={handleAddEntry}
+        onDeleteEntry={handleDeleteEntry}
+      />
 
       {/* Dollar breakdown summary */}
       {dollarBreakdown.size > 0 && (

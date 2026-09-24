@@ -1,10 +1,17 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import type { TimecardWithEntries, EmployeeRate } from "@/types";
+import Link from "next/link";
+import type { TimecardWithEntries, EmployeeRate, PayFrequency } from "@/types";
 import type { EmployeeWithRates } from "@/app/api/admin/employees/route";
 
 // ── Constants ──────────────────────────────────────────────────────────────
+
+const PAY_FREQUENCY_OPTIONS: { value: PayFrequency; label: string }[] = [
+  { value: "weekly", label: "Weekly" },
+  { value: "semi_monthly", label: "Semi-monthly" },
+  { value: "monthly", label: "Monthly" },
+];
 
 const STATUS_COLORS: Record<string, string> = {
   submitted: "bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-300",
@@ -315,6 +322,25 @@ function EmployeeCard({ employee, onRatesChanged }: EmployeeCardProps) {
   const [isDefault, setIsDefault] = useState(false);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [savingFrequency, setSavingFrequency] = useState(false);
+  const [frequencyError, setFrequencyError] = useState<string | null>(null);
+
+  const handleFrequencyChange = async (pay_frequency: string) => {
+    setFrequencyError(null);
+    setSavingFrequency(true);
+    const res = await fetch(`/api/admin/employees/${employee.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pay_frequency }),
+    });
+    setSavingFrequency(false);
+    if (res.ok) {
+      onRatesChanged();
+    } else {
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      setFrequencyError(json.error ?? "Failed to update pay frequency.");
+    }
+  };
 
   const handleAdd = async () => {
     setError(null);
@@ -370,12 +396,35 @@ function EmployeeCard({ employee, onRatesChanged }: EmployeeCardProps) {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <select
+            value={employee.pay_frequency}
+            onChange={(e) => handleFrequencyChange(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            disabled={savingFrequency}
+            data-testid={`pay-frequency-select-${employee.id}`}
+            className="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-xs px-2 py-1.5 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400 disabled:opacity-50"
+          >
+            {PAY_FREQUENCY_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
           <span className="text-xs text-gray-500 dark:text-gray-400">
             {employee.rates.length} {employee.rates.length === 1 ? "rate" : "rates"}
           </span>
           <span className="text-gray-400 dark:text-gray-500 text-xs">{expanded ? "▲" : "▼"}</span>
         </div>
       </div>
+
+      {frequencyError && (
+        <p
+          className="px-5 pb-3 -mt-1 text-xs text-red-500 dark:text-red-400"
+          data-testid={`pay-frequency-error-${employee.id}`}
+        >
+          {frequencyError}
+        </p>
+      )}
 
       {expanded && (
         <div className="border-t border-gray-100 dark:border-gray-700/50 px-5 py-4">
@@ -471,6 +520,160 @@ function ManageUsersTab({ employees, loading, onRatesChanged }: ManageUsersTabPr
   );
 }
 
+// ── NotificationBell ───────────────────────────────────────────────────────
+
+interface AdminNotification {
+  id: string;
+  type: string;
+  message: string;
+  timecardId: string | null;
+  readAt: string | null;
+  createdAt: string;
+}
+
+function formatRelativeTime(iso: string) {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 45) return "just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return formatDate(iso.slice(0, 10));
+}
+
+interface NotificationBellProps {
+  // Timecard review lives on this same page's "To Review" tab (there's no
+  // per-timecard deep link elsewhere in the codebase), so a notification
+  // click "navigates" there by switching tabs rather than via next/link.
+  onNavigateToReview: () => void;
+}
+
+function NotificationBell({ onNavigateToReview }: NotificationBellProps) {
+  const [notifications, setNotifications] = useState<AdminNotification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [open, setOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    const res = await fetch("/api/admin/notifications");
+    if (!res.ok) return;
+    const json = (await res.json()) as { notifications: AdminNotification[]; unreadCount: number };
+    setNotifications(json.notifications);
+    setUnreadCount(json.unreadCount);
+  }, []);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+    const interval = setInterval(load, 45000);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const markRead = useCallback(async (id: string) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id && !n.readAt ? { ...n, readAt: new Date().toISOString() } : n))
+    );
+    setUnreadCount((c) => Math.max(0, c - 1));
+    try {
+      await fetch("/api/admin/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+    } catch {
+      // best-effort; a stale badge count will self-correct on the next poll
+    }
+  }, []);
+
+  const markAll = async () => {
+    setNotifications((prev) => prev.map((n) => (n.readAt ? n : { ...n, readAt: new Date().toISOString() })));
+    setUnreadCount(0);
+    try {
+      await fetch("/api/admin/notifications", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ markAll: true }),
+      });
+    } catch {
+      // best-effort; a stale badge count will self-correct on the next poll
+    }
+  };
+
+  const handleItemClick = (n: AdminNotification) => {
+    if (!n.readAt) markRead(n.id);
+    setOpen(false);
+    if (n.timecardId) onNavigateToReview();
+  };
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        data-testid="notification-bell-button"
+        aria-label="Notifications"
+        aria-expanded={open}
+        className="relative rounded-lg p-2 text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+      >
+        <span aria-hidden="true" className="text-lg leading-none">
+          🔔
+        </span>
+        {unreadCount > 0 && (
+          <span
+            data-testid="notification-unread-badge"
+            className="absolute -top-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-none text-white"
+          >
+            {unreadCount > 9 ? "9+" : unreadCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div
+          data-testid="notification-panel"
+          className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-lg z-50"
+        >
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 dark:border-gray-700/50">
+            <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Notifications</p>
+            <button
+              onClick={markAll}
+              disabled={unreadCount === 0}
+              data-testid="notification-mark-all-btn"
+              className="text-xs text-indigo-600 hover:underline disabled:opacity-40 disabled:no-underline disabled:cursor-not-allowed"
+            >
+              Mark all read
+            </button>
+          </div>
+          {notifications.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-gray-400 dark:text-gray-500 text-center">
+              No notifications yet.
+            </p>
+          ) : (
+            <ul>
+              {notifications.map((n) => (
+                <li key={n.id} data-testid={`notification-item-${n.id}`}>
+                  <button
+                    onClick={() => handleItemClick(n)}
+                    className={`w-full text-left px-4 py-3 border-b border-gray-50 dark:border-gray-700/30 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors ${
+                      !n.readAt ? "bg-blue-50/60 dark:bg-blue-900/10" : ""
+                    }`}
+                  >
+                    <p className="text-sm text-gray-800 dark:text-gray-200">{n.message}</p>
+                    <p className="mt-0.5 text-xs text-gray-400 dark:text-gray-500">
+                      {formatRelativeTime(n.createdAt)}
+                    </p>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── AdminPage (root) ───────────────────────────────────────────────────────
 
 export default function AdminPage() {
@@ -539,9 +742,19 @@ export default function AdminPage() {
       {/* Page header */}
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Admin</h1>
-        <button onClick={handleRefresh} className="text-sm text-indigo-600 hover:underline">
-          Refresh
-        </button>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/admin/payroll-runs"
+            data-testid="nav-payroll-runs"
+            className="text-sm text-indigo-600 hover:underline"
+          >
+            Payroll Runs
+          </Link>
+          <button onClick={handleRefresh} className="text-sm text-indigo-600 hover:underline">
+            Refresh
+          </button>
+          <NotificationBell onNavigateToReview={() => setActiveTab("review")} />
+        </div>
       </div>
 
       {/* Tab bar */}

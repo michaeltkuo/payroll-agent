@@ -1,8 +1,20 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { PayPeriod } from "@/types";
 
+type PayFrequency = "weekly" | "semi_monthly" | "monthly";
+
+interface PayPeriodBounds {
+  start_date: string;
+  end_date: string;
+}
+
 function toISODate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+/** Last calendar day of the month containing `date` (handles Feb/28/29/30/31-day months). */
+function lastDayOfMonth(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
 }
 
 /**
@@ -19,10 +31,7 @@ export function getWeekStart(date: Date): Date {
 /**
  * Returns the Sunday–Saturday date range for the week containing referenceDate.
  */
-export function generateWeeklyPeriod(referenceDate: Date): {
-  start_date: string;
-  end_date: string;
-} {
+export function generateWeeklyPeriod(referenceDate: Date): PayPeriodBounds {
   const start = getWeekStart(referenceDate);
   const end = new Date(start);
   end.setDate(end.getDate() + 6); // Saturday
@@ -33,32 +42,117 @@ export function generateWeeklyPeriod(referenceDate: Date): {
 }
 
 /**
- * Parses an optional week query/body param into a week-start Date.
- * Falls back to the current week if the param is absent.
- * Throws with a descriptive message if the value is an invalid date string.
+ * Returns the semi-monthly date range containing `date`: the 1st–15th when
+ * the date falls on or before the 15th, otherwise the 16th–end-of-month.
  */
-export function parseWeekParam(weekStr: string | null | undefined): Date {
-  if (!weekStr) return getWeekStart(new Date());
-  const parsed = new Date(weekStr + "T00:00:00");
-  if (isNaN(parsed.getTime())) throw new Error("Invalid week parameter");
-  return getWeekStart(parsed);
+export function getSemiMonthlyPeriod(date: Date): PayPeriodBounds {
+  const year = date.getFullYear();
+  const month = date.getMonth();
+
+  if (date.getDate() <= 15) {
+    return {
+      start_date: toISODate(new Date(year, month, 1)),
+      end_date: toISODate(new Date(year, month, 15)),
+    };
+  }
+
+  return {
+    start_date: toISODate(new Date(year, month, 16)),
+    end_date: toISODate(new Date(year, month, lastDayOfMonth(date))),
+  };
 }
 
 /**
- * Fetches the pay period matching the exact Sunday–Saturday window of weekStart.
- * Creates a new open pay period if none exists for that week.
+ * Returns the calendar-month date range (1st–last day) containing `date`.
  */
-export async function getPayPeriodForWeek(
+export function getMonthlyPeriod(date: Date): PayPeriodBounds {
+  const year = date.getFullYear();
+  const month = date.getMonth();
+  return {
+    start_date: toISODate(new Date(year, month, 1)),
+    end_date: toISODate(new Date(year, month, lastDayOfMonth(date))),
+  };
+}
+
+/**
+ * Dispatches to the correct period-bounds calculator for the given pay
+ * frequency. Throws on an unrecognized frequency.
+ */
+export function getPeriodBoundsForFrequency(
+  frequency: string,
+  referenceDate: Date
+): PayPeriodBounds {
+  switch (frequency) {
+    case "weekly":
+      return generateWeeklyPeriod(getWeekStart(referenceDate));
+    case "semi_monthly":
+      return getSemiMonthlyPeriod(referenceDate);
+    case "monthly":
+      return getMonthlyPeriod(referenceDate);
+    default:
+      throw new Error(`Unrecognized pay frequency: ${frequency}`);
+  }
+}
+
+/**
+ * Parses an optional week/period query/body param into a period-start Date,
+ * normalized according to `frequency` (defaults to "weekly"):
+ *  - weekly: normalized to that week's Sunday
+ *  - semi_monthly: normalized to the 1st or the 16th of that month
+ *  - monthly: normalized to the 1st of that month
+ * Falls back to today's period start if the param is absent.
+ * Throws "Invalid week parameter" if the value is an invalid date string.
+ */
+export function parseWeekParam(
+  weekStr: string | null | undefined,
+  frequency: PayFrequency | string = "weekly"
+): Date {
+  const parsed = weekStr ? new Date(weekStr + "T00:00:00") : new Date();
+  if (isNaN(parsed.getTime())) throw new Error("Invalid week parameter");
+
+  switch (frequency) {
+    case "weekly":
+      return getWeekStart(parsed);
+    case "semi_monthly": {
+      const day = parsed.getDate() <= 15 ? 1 : 16;
+      const normalized = new Date(parsed);
+      normalized.setHours(0, 0, 0, 0);
+      normalized.setDate(day);
+      return normalized;
+    }
+    case "monthly": {
+      const normalized = new Date(parsed);
+      normalized.setHours(0, 0, 0, 0);
+      normalized.setDate(1);
+      return normalized;
+    }
+    default:
+      throw new Error(`Unrecognized pay frequency: ${frequency}`);
+  }
+}
+
+/**
+ * Fetches the pay period matching the exact start/end/frequency window for
+ * `employee` around `referenceDate`. Creates a new open pay period (tagged
+ * with the resolved frequency) if none exists for that window.
+ */
+export async function getPayPeriodForEmployee(
   supabase: SupabaseClient,
-  weekStart: Date
+  employee: { pay_frequency: string },
+  referenceDate: Date
 ): Promise<PayPeriod> {
-  const { start_date, end_date } = generateWeeklyPeriod(weekStart);
+  const frequency = employee.pay_frequency;
+  const { start_date, end_date } = getPeriodBoundsForFrequency(
+    frequency,
+    referenceDate
+  );
 
   const { data: existing, error } = await supabase
     .from("pay_periods")
     .select("*")
     .eq("start_date", start_date)
     .eq("end_date", end_date)
+    .eq("frequency", frequency)
     .maybeSingle();
 
   if (error) throw new Error(`Failed to fetch pay period: ${error.message}`);
@@ -71,7 +165,7 @@ export async function getPayPeriodForWeek(
 
   const { data: created, error: createError } = await supabase
     .from("pay_periods")
-    .insert({ start_date, end_date, status: "open" })
+    .insert({ start_date, end_date, status: "open", frequency })
     .select()
     .single();
 
@@ -79,18 +173,4 @@ export async function getPayPeriodForWeek(
     throw new Error(`Failed to create pay period: ${createError.message}`);
 
   return created as PayPeriod;
-}
-
-/** Fetches (or creates) the pay period for the current week. */
-export async function getCurrentPayPeriod(
-  supabase: SupabaseClient
-): Promise<PayPeriod> {
-  return getPayPeriodForWeek(supabase, new Date());
-}
-
-/** Ensures a pay period exists for the current week. Safe to call on app start. */
-export async function ensurePayPeriodExists(
-  supabase: SupabaseClient
-): Promise<PayPeriod> {
-  return getCurrentPayPeriod(supabase);
 }

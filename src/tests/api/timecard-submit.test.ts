@@ -8,18 +8,21 @@ vi.mock("@/auth", () => ({ auth: vi.fn() }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: { from: vi.fn() } }));
 vi.mock("@/lib/pay-periods", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/pay-periods")>();
-  return { ...original, getPayPeriodForWeek: vi.fn() };
+  return { ...original, getPayPeriodForEmployee: vi.fn() };
 });
+vi.mock("@/inngest/client", () => ({ inngest: { send: vi.fn() } }));
 
 import { POST } from "@/app/api/timecard/submit/route";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getPayPeriodForWeek } from "@/lib/pay-periods";
+import { getPayPeriodForEmployee } from "@/lib/pay-periods";
+import { inngest } from "@/inngest/client";
 
 const MOCK_SESSION = { user: { email: "employee@example.com" } };
-const MOCK_USER = { id: "user-uuid" };
-const MOCK_PAY_PERIOD = { id: "pp-uuid", start_date: "2025-05-11", end_date: "2025-05-17", status: "open", created_at: "" };
+const MOCK_USER = { id: "user-uuid", name: "Employee Example", email: "employee@example.com", pay_frequency: "weekly" };
+const MOCK_PAY_PERIOD = { id: "pp-uuid", start_date: "2025-05-11", end_date: "2025-05-17", status: "open", frequency: "weekly", created_at: "" };
 const MOCK_TIMECARD = { id: "tc-uuid", status: "draft" };
+const MOCK_ADMINS = [{ id: "admin-1" }, { id: "admin-2" }];
 
 function makeChain(value: { data: unknown; error: unknown }) {
   const methods = ["select", "eq", "lte", "gte", "insert", "upsert", "update", "order"] as const;
@@ -59,7 +62,7 @@ const COMPLETE_ENTRIES = [
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(auth).mockResolvedValue(MOCK_SESSION as never);
-  vi.mocked(getPayPeriodForWeek).mockResolvedValue(MOCK_PAY_PERIOD as never);
+  vi.mocked(getPayPeriodForEmployee).mockResolvedValue(MOCK_PAY_PERIOD as never);
 });
 
 describe("POST /api/timecard/submit", () => {
@@ -70,6 +73,7 @@ describe("POST /api/timecard/submit", () => {
   });
 
   it("returns 400 for an invalid week param", async () => {
+    makeFrom({ data: MOCK_USER, error: null }); // user lookup happens before week validation
     const res = await POST(makeSubmitRequest({ week: "garbage" }));
     expect(res.status).toBe(400);
   });
@@ -137,12 +141,26 @@ describe("POST /api/timecard/submit", () => {
     });
   });
 
+  it("returns 500 when the timecard status update fails", async () => {
+    makeFrom(
+      { data: MOCK_USER, error: null },
+      { data: MOCK_TIMECARD, error: null },
+      { data: COMPLETE_ENTRIES, error: null },
+      { data: null, error: { message: "update failed" } }, // update call errors
+    );
+    const res = await POST(makeSubmitRequest({ week: "2025-05-11" }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ error: "update failed" });
+  });
+
   it("submits successfully and returns { success: true }", async () => {
     makeFrom(
       { data: MOCK_USER, error: null },
       { data: MOCK_TIMECARD, error: null },
       { data: COMPLETE_ENTRIES, error: null }, // entries fetch
       { data: null, error: null },              // update call
+      { data: MOCK_ADMINS, error: null },       // admins fetch
+      { data: null, error: null },              // notifications insert
     );
     const res = await POST(makeSubmitRequest({ week: "2025-05-11" }));
     expect(res.status).toBe(200);
@@ -155,6 +173,8 @@ describe("POST /api/timecard/submit", () => {
       { data: { ...MOCK_TIMECARD, status: "rejected" }, error: null },
       { data: COMPLETE_ENTRIES, error: null },
       { data: null, error: null },
+      { data: MOCK_ADMINS, error: null },
+      { data: null, error: null },
     );
     const res = await POST(makeSubmitRequest());
     expect(res.status).toBe(200);
@@ -166,15 +186,107 @@ describe("POST /api/timecard/submit", () => {
       { data: MOCK_TIMECARD, error: null },
       { data: COMPLETE_ENTRIES, error: null },
       { data: null, error: null },
+      { data: MOCK_ADMINS, error: null },
+      { data: null, error: null },
     );
     // No body at all — route should default to current week
     const req = new NextRequest("http://localhost/api/timecard/submit", { method: "POST" });
     const res = await POST(req);
 
-    expect(getPayPeriodForWeek).toHaveBeenCalled();
-    const callArg: Date = vi.mocked(getPayPeriodForWeek).mock.calls[0][1];
+    expect(getPayPeriodForEmployee).toHaveBeenCalled();
+    const callArg: Date = vi.mocked(getPayPeriodForEmployee).mock.calls[0][2];
     expect(callArg.getDay()).toBe(0); // Sunday
     expect(res.status).toBe(200);
+  });
+
+  it("inserts a notification row per admin and fires the payroll/timecard.submitted Inngest event on successful submit", async () => {
+    const fromFn = makeFrom(
+      { data: MOCK_USER, error: null },
+      { data: MOCK_TIMECARD, error: null },
+      { data: COMPLETE_ENTRIES, error: null }, // entries fetch
+      { data: null, error: null },              // update call
+      { data: MOCK_ADMINS, error: null },       // admins fetch
+      { data: null, error: null },              // notifications insert
+    );
+
+    const res = await POST(makeSubmitRequest({ week: "2025-05-11" }));
+    expect(res.status).toBe(200);
+
+    // 5th from() call is the admins lookup, 6th is the notifications insert
+    expect(fromFn.mock.calls[4][0]).toBe("users");
+    expect(fromFn.mock.calls[5][0]).toBe("notifications");
+
+    const notificationsBuilder = fromFn.mock.results[5].value as { insert: ReturnType<typeof vi.fn> };
+    expect(notificationsBuilder.insert).toHaveBeenCalledWith(
+      MOCK_ADMINS.map((admin) => ({
+        recipient_user_id: admin.id,
+        type: "timecard_submitted",
+        timecard_id: MOCK_TIMECARD.id,
+        message: expect.stringContaining(MOCK_USER.name),
+      }))
+    );
+
+    expect(inngest.send).toHaveBeenCalledWith({
+      name: "payroll/timecard.submitted",
+      data: {
+        timecardId: MOCK_TIMECARD.id,
+        employeeId: MOCK_USER.id,
+        employeeName: MOCK_USER.name,
+        periodStart: MOCK_PAY_PERIOD.start_date,
+        periodEnd: MOCK_PAY_PERIOD.end_date,
+      },
+    });
+  });
+
+  it("skips the notifications insert (but still submits and fires the event) when there are no admins", async () => {
+    makeFrom(
+      { data: MOCK_USER, error: null },
+      { data: MOCK_TIMECARD, error: null },
+      { data: COMPLETE_ENTRIES, error: null },
+      { data: null, error: null },
+      { data: [], error: null }, // no admins
+    );
+
+    const res = await POST(makeSubmitRequest({ week: "2025-05-11" }));
+    expect(res.status).toBe(200);
+    expect(inngest.send).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "payroll/timecard.submitted" })
+    );
+  });
+
+  it("still submits and fires the event when the notifications insert errors", async () => {
+    makeFrom(
+      { data: MOCK_USER, error: null },
+      { data: MOCK_TIMECARD, error: null },
+      { data: COMPLETE_ENTRIES, error: null },
+      { data: null, error: null },
+      { data: MOCK_ADMINS, error: null },
+      { data: null, error: { message: "notifications insert failed" } },
+    );
+
+    const res = await POST(makeSubmitRequest({ week: "2025-05-11" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+    expect(inngest.send).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "payroll/timecard.submitted" })
+    );
+  });
+
+  it("still submits and fires the event when the admins lookup errors", async () => {
+    makeFrom(
+      { data: MOCK_USER, error: null },
+      { data: MOCK_TIMECARD, error: null },
+      { data: COMPLETE_ENTRIES, error: null },
+      { data: null, error: null },
+      { data: null, error: { message: "admins lookup failed" } },
+    );
+
+    const res = await POST(makeSubmitRequest({ week: "2025-05-11" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+    expect(inngest.send).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "payroll/timecard.submitted" })
+    );
   });
 });
 

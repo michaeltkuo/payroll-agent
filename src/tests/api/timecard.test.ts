@@ -22,25 +22,26 @@ vi.mock("@/lib/pay-periods", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/pay-periods")>();
   return {
     ...original, // keep getWeekStart, generateWeeklyPeriod, parseWeekParam real
-    getPayPeriodForWeek: vi.fn(),
+    getPayPeriodForEmployee: vi.fn(),
   };
 });
 
 import { GET, POST } from "@/app/api/timecard/route";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getPayPeriodForWeek } from "@/lib/pay-periods";
+import { getPayPeriodForEmployee } from "@/lib/pay-periods";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
 // ---------------------------------------------------------------------------
 const MOCK_SESSION = { user: { email: "employee@example.com" } };
-const MOCK_USER = { id: "user-uuid" };
+const MOCK_USER = { id: "user-uuid", pay_frequency: "weekly" };
 const MOCK_PAY_PERIOD = {
   id: "pp-uuid",
   start_date: "2025-05-11",
   end_date: "2025-05-17",
   status: "open",
+  frequency: "weekly",
   created_at: "2025-05-11T00:00:00Z",
 };
 const MOCK_TIMECARD = { id: "tc-uuid", status: "draft", employee_id: "user-uuid", pay_period_id: "pp-uuid" };
@@ -101,7 +102,7 @@ describe("GET /api/timecard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(auth).mockResolvedValue(MOCK_SESSION as never);
-    vi.mocked(getPayPeriodForWeek).mockResolvedValue(MOCK_PAY_PERIOD as never);
+    vi.mocked(getPayPeriodForEmployee).mockResolvedValue(MOCK_PAY_PERIOD as never);
   });
 
   it("returns 401 when unauthenticated", async () => {
@@ -113,6 +114,7 @@ describe("GET /api/timecard", () => {
   });
 
   it("returns 400 for an invalid week param", async () => {
+    makeFrom({ data: MOCK_USER, error: null }); // user lookup happens before week validation
     const req = new NextRequest("http://localhost/api/timecard?week=bad-date");
     const res = await GET(req);
     expect(res.status).toBe(400);
@@ -142,16 +144,17 @@ describe("GET /api/timecard", () => {
     expect(body.timecard).toEqual(MOCK_TIMECARD);
     expect(body.entries).toEqual(MOCK_ENTRIES);
     expect(body.rates).toEqual([]);
+    expect(body.pay_frequency).toBe("weekly");
   });
 
-  it("accepts a ?week= param and calls getPayPeriodForWeek with the normalised Sunday", async () => {
+  it("accepts a ?week= param and calls getPayPeriodForEmployee with the normalised Sunday", async () => {
     makeFrom(
       { data: MOCK_USER, error: null },
       { data: MOCK_TIMECARD, error: null },
       { data: [], error: null },
       { data: [], error: null }, // rates
     );
-    vi.mocked(getPayPeriodForWeek).mockResolvedValue({
+    vi.mocked(getPayPeriodForEmployee).mockResolvedValue({
       ...MOCK_PAY_PERIOD,
       start_date: "2025-05-04",
       end_date: "2025-05-10",
@@ -161,8 +164,43 @@ describe("GET /api/timecard", () => {
     const req = new NextRequest("http://localhost/api/timecard?week=2025-05-07");
     await GET(req);
 
-    const callArg: Date = vi.mocked(getPayPeriodForWeek).mock.calls[0][1];
+    const callArg: Date = vi.mocked(getPayPeriodForEmployee).mock.calls[0][2];
     expect(callArg.toISOString().slice(0, 10)).toBe("2025-05-04");
+  });
+
+  it("resolves a semi-monthly (non-weekly) pay period for a semi-monthly employee", async () => {
+    const semiMonthlyUser = { id: "user-uuid", pay_frequency: "semi_monthly" };
+    const semiMonthlyPeriod = {
+      id: "pp-semi-uuid",
+      start_date: "2025-05-16",
+      end_date: "2025-05-31",
+      status: "open",
+      frequency: "semi_monthly",
+      created_at: "2025-05-16T00:00:00Z",
+    };
+    vi.mocked(getPayPeriodForEmployee).mockResolvedValue(semiMonthlyPeriod as never);
+
+    makeFrom(
+      { data: semiMonthlyUser, error: null }, // user lookup (with semi_monthly frequency)
+      { data: MOCK_TIMECARD, error: null },
+      { data: MOCK_ENTRIES, error: null },
+      { data: [], error: null }, // rates
+    );
+
+    // 2025-05-20 is in the second half of the month
+    const req = new NextRequest("http://localhost/api/timecard?week=2025-05-20");
+    const res = await GET(req);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // The resolved period is the semi-monthly window, not a Sun–Sat week
+    expect(body.pay_period).toEqual(semiMonthlyPeriod);
+    expect(body.pay_frequency).toBe("semi_monthly");
+
+    const [, employeeArg, referenceDateArg] = vi.mocked(getPayPeriodForEmployee).mock.calls[0];
+    expect(employeeArg).toEqual(semiMonthlyUser);
+    // Normalised to the 16th (semi-monthly), never a Sunday (weekly)
+    expect((referenceDateArg as Date).toISOString().slice(0, 10)).toBe("2025-05-16");
   });
 
   it("returns 200 with empty entries array when there are no entries", async () => {
@@ -217,7 +255,7 @@ describe("POST /api/timecard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(auth).mockResolvedValue(MOCK_SESSION as never);
-    vi.mocked(getPayPeriodForWeek).mockResolvedValue(MOCK_PAY_PERIOD as never);
+    vi.mocked(getPayPeriodForEmployee).mockResolvedValue(MOCK_PAY_PERIOD as never);
   });
 
   function makePostRequest(body: Record<string, unknown>) {
@@ -241,6 +279,7 @@ describe("POST /api/timecard", () => {
   });
 
   it("returns 400 for invalid week param", async () => {
+    makeFrom({ data: MOCK_USER, error: null }); // user lookup happens before week validation
     const res = await POST(makePostRequest({ work_date: "2025-05-12", week: "not-a-date" }));
     expect(res.status).toBe(400);
   });

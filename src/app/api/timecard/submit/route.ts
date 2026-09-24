@@ -2,10 +2,11 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getPayPeriodForWeek, parseWeekParam } from "@/lib/pay-periods";
+import { getPayPeriodForEmployee, parseWeekParam } from "@/lib/pay-periods";
+import { inngest } from "@/inngest/client";
 import type { TimeEntry } from "@/types";
 
-/** POST /api/timecard/submit — submit a weekly timecard for approval */
+/** POST /api/timecard/submit — submit a timecard for approval */
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.email) {
@@ -16,19 +17,12 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
-    // body is optional; defaults to current week
-  }
-
-  let weekStart;
-  try {
-    weekStart = parseWeekParam(body.week);
-  } catch {
-    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
+    // body is optional; defaults to current period
   }
 
   const { data: user } = await supabaseAdmin
     .from("users")
-    .select("id")
+    .select("id, name, email, pay_frequency")
     .eq("email", session.user.email)
     .maybeSingle();
 
@@ -36,7 +30,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  const payPeriod = await getPayPeriodForWeek(supabaseAdmin, weekStart);
+  let weekStart;
+  try {
+    weekStart = parseWeekParam(body.week, user.pay_frequency);
+  } catch {
+    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
+  }
+
+  const payPeriod = await getPayPeriodForEmployee(supabaseAdmin, user, weekStart);
 
   const { data: timecard } = await supabaseAdmin
     .from("timecards")
@@ -89,6 +90,44 @@ export async function POST(req: NextRequest) {
   if (updateError) {
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
+
+  const employeeName = user.name ?? user.email ?? "An employee";
+  const notificationMessage = `${employeeName} submitted a timecard for ${payPeriod.start_date}–${payPeriod.end_date}`;
+
+  // Notify admins in-app. Best-effort: the timecard is already submitted, so a
+  // notification/event delivery hiccup here should not surface as a failed submit.
+  const { data: admins, error: adminsError } = await supabaseAdmin
+    .from("users")
+    .select("id")
+    .eq("role", "admin");
+
+  if (adminsError) {
+    console.error("Failed to fetch admins for notifications:", adminsError.message);
+  } else if (admins && admins.length > 0) {
+    const { error: notifyError } = await supabaseAdmin.from("notifications").insert(
+      admins.map((admin) => ({
+        recipient_user_id: admin.id,
+        type: "timecard_submitted",
+        timecard_id: timecard.id,
+        message: notificationMessage,
+      }))
+    );
+    if (notifyError) {
+      console.error("Failed to insert admin notifications:", notifyError.message);
+    }
+  }
+
+  // Fire Inngest event for downstream automation (listener added separately)
+  await inngest.send({
+    name: "payroll/timecard.submitted",
+    data: {
+      timecardId: timecard.id,
+      employeeId: user.id,
+      employeeName,
+      periodStart: payPeriod.start_date,
+      periodEnd: payPeriod.end_date,
+    },
+  });
 
   return NextResponse.json({ success: true });
 }
