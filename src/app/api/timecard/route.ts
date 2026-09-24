@@ -2,26 +2,19 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getPayPeriodForWeek, parseWeekParam } from "@/lib/pay-periods";
+import { getPayPeriodForEmployee, parseWeekParam } from "@/lib/pay-periods";
 import type { Timecard, TimeEntry } from "@/types";
 
-/** GET /api/timecard?week=YYYY-MM-DD — fetch (or create) the timecard + entries for a given week */
+/** GET /api/timecard?week=YYYY-MM-DD — fetch (or create) the timecard + entries for a given period */
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let weekStart;
-  try {
-    weekStart = parseWeekParam(req.nextUrl.searchParams.get("week"));
-  } catch {
-    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
-  }
-
   const { data: user, error: userError } = await supabaseAdmin
     .from("users")
-    .select("id")
+    .select("id, pay_frequency")
     .eq("email", session.user.email)
     .maybeSingle();
 
@@ -29,7 +22,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  const payPeriod = await getPayPeriodForWeek(supabaseAdmin, weekStart);
+  let weekStart;
+  try {
+    weekStart = parseWeekParam(req.nextUrl.searchParams.get("week"), user.pay_frequency);
+  } catch {
+    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
+  }
+
+  const payPeriod = await getPayPeriodForEmployee(supabaseAdmin, user, weekStart);
 
   // Upsert timecard (creates draft if not yet present)
   const { data: timecard, error: tcError } = await supabaseAdmin
@@ -79,6 +79,7 @@ export async function GET(req: NextRequest) {
     entries: (entries ?? []) as TimeEntry[],
     pay_period: payPeriod,
     rates: rates ?? [],
+    pay_frequency: user.pay_frequency,
   });
 }
 
@@ -102,16 +103,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "work_date is required" }, { status: 400 });
   }
 
-  let weekStart;
-  try {
-    weekStart = parseWeekParam(body.week);
-  } catch {
-    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
-  }
-
   const { data: user } = await supabaseAdmin
     .from("users")
-    .select("id")
+    .select("id, pay_frequency")
     .eq("email", session.user.email)
     .maybeSingle();
 
@@ -119,7 +113,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "User not found" }, { status: 404 });
   }
 
-  const payPeriod = await getPayPeriodForWeek(supabaseAdmin, weekStart);
+  let weekStart;
+  try {
+    weekStart = parseWeekParam(body.week, user.pay_frequency);
+  } catch {
+    return NextResponse.json({ error: "Invalid week parameter" }, { status: 400 });
+  }
+
+  const payPeriod = await getPayPeriodForEmployee(supabaseAdmin, user, weekStart);
 
   const { data: timecard } = await supabaseAdmin
     .from("timecards")

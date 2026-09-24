@@ -1,3 +1,5 @@
+export type PayFrequency = "weekly" | "semi_monthly" | "monthly";
+
 export interface User {
   id: string;
   email: string;
@@ -5,6 +7,7 @@ export interface User {
   image: string | null;
   role: "employee" | "admin";
   employee_number: string | null;
+  pay_frequency: PayFrequency;
   created_at: string;
 }
 

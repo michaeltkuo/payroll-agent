@@ -162,7 +162,11 @@ GOOGLE_CLIENT_SECRET=          # Google OAuth app
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
-ADMIN_EMAIL=                   # email that gets the "admin" role
+ADMIN_EMAIL=                   # email that gets the "admin" role; also the recipient for
+                                # admin notification emails (src/inngest/notifications.ts)
+RESEND_API_KEY=                # Resend API key, used to send the timecard-submitted email
+NEXT_PUBLIC_APP_URL=           # absolute base URL used to build links in emails
+                                # (falls back to http://localhost:3000 if unset)
 ```
 
 ---

@@ -18,7 +18,16 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        // Use the pre-installed Chromium binary when present (e.g. sandboxed
+        // CI/dev containers that ship a browser at a fixed path outside the
+        // Playwright-managed cache) instead of the revision-pinned browser
+        // `npx playwright install` would otherwise download.
+        launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE
+          ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE }
+          : {},
+      },
     },
   ],
   webServer: {
