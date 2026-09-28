@@ -25,6 +25,7 @@ export interface PayPeriod {
   start_date: string; // ISO date string YYYY-MM-DD
   end_date: string;
   status: "open" | "closed";
+  frequency: PayFrequency;
   created_at: string;
 }
 

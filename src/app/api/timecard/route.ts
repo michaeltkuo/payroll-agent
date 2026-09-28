@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
-import { getPayPeriodForEmployee, parseWeekParam } from "@/lib/pay-periods";
+import { getOrCreateTimecard, getPayPeriodForEmployee, parseWeekParam } from "@/lib/pay-periods";
 import type { Timecard, TimeEntry } from "@/types";
 
 /** GET /api/timecard?week=YYYY-MM-DD — fetch (or create) the timecard + entries for a given period */
@@ -31,31 +31,12 @@ export async function GET(req: NextRequest) {
 
   const payPeriod = await getPayPeriodForEmployee(supabaseAdmin, user, weekStart);
 
-  // Upsert timecard (creates draft if not yet present)
-  const { data: timecard, error: tcError } = await supabaseAdmin
-    .from("timecards")
-    .upsert(
-      { employee_id: user.id, pay_period_id: payPeriod.id },
-      { onConflict: "employee_id,pay_period_id", ignoreDuplicates: true }
-    )
-    .select()
-    .maybeSingle();
-
-  // If upsert returned nothing (ignoreDuplicates=true and row already existed), fetch it
-  let resolvedTimecard: Timecard | null = timecard as Timecard | null;
-  if (!resolvedTimecard) {
-    const { data: existing } = await supabaseAdmin
-      .from("timecards")
-      .select("*")
-      .eq("employee_id", user.id)
-      .eq("pay_period_id", payPeriod.id)
-      .single();
-    resolvedTimecard = existing as Timecard;
-  }
-
-  if (tcError && !resolvedTimecard) {
+  let resolvedTimecard: Timecard;
+  try {
+    resolvedTimecard = await getOrCreateTimecard(supabaseAdmin, user.id, payPeriod.id);
+  } catch (err) {
     return NextResponse.json(
-      { error: `Failed to get timecard: ${tcError.message}` },
+      { error: err instanceof Error ? err.message : "Failed to get timecard" },
       { status: 500 }
     );
   }
@@ -63,7 +44,7 @@ export async function GET(req: NextRequest) {
   const { data: entries } = await supabaseAdmin
     .from("time_entries")
     .select("*, rate:employee_rates(*)")
-    .eq("timecard_id", resolvedTimecard!.id)
+    .eq("timecard_id", resolvedTimecard.id)
     .order("work_date", { ascending: true })
     .order("entry_order", { ascending: true });
 

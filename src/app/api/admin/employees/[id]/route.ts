@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
+import { reconcileDraftTimecardsForFrequencyChange } from "@/lib/pay-periods";
 
 const VALID_PAY_FREQUENCIES = ["weekly", "semi_monthly", "monthly"] as const;
 type PayFrequency = (typeof VALID_PAY_FREQUENCIES)[number];
@@ -35,5 +36,14 @@ export async function PATCH(
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
   if (!employee) return NextResponse.json({ error: "Employee not found" }, { status: 404 });
 
-  return NextResponse.json({ employee });
+  // Draft/rejected entries logged under the employee's PREVIOUS frequency
+  // would otherwise silently vanish from their dashboard once every future
+  // read/write starts resolving periods under the new one — reconcile them.
+  const reconciliation = await reconcileDraftTimecardsForFrequencyChange(
+    supabaseAdmin,
+    id,
+    body.pay_frequency
+  );
+
+  return NextResponse.json({ employee, reconciliation });
 }
