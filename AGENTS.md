@@ -114,6 +114,8 @@ Two things to know about this `staging` branch:
 - It shares the **exact same production Supabase database** as `main` (there's no separate staging project) — treat any action taken there as a real write to production data, not a sandbox.
 - Since `db-migrate.yml` only applies migrations on merge to `main`, a PR that adds a new migration won't have that schema live on `staging` until after it's merged to `main` — schema-dependent behavior can't be fully verified pre-merge this way.
 
+**Gotcha:** in the Vercel dashboard's Deployments list, the "Preview" button on a given row always opens *that specific deployment's* own one-off URL (e.g. `payroll-agent-4klbsd3e2-...vercel.app`), never the stable `payroll-agent-git-staging-...` alias — even for the row whose branch is `staging`. Only the alias URL above is OAuth-whitelisted; always navigate there directly (or use `list_deployment_aliases` via the Vercel MCP tools to confirm which deployment it currently points to) rather than clicking through from the deployments list.
+
 ---
 
 ## Testing rules
