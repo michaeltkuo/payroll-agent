@@ -5,21 +5,52 @@ import { supabaseAdmin } from "@/lib/supabase";
 import { getPayPeriodForEmployee, parseWeekParam } from "@/lib/pay-periods";
 import type { Timecard, TimeEntry } from "@/types";
 
-/** GET /api/timecard?week=YYYY-MM-DD — fetch (or create) the timecard + entries for a given period */
+/**
+ * GET /api/timecard?week=YYYY-MM-DD — fetch (or create) the timecard + entries for a given period.
+ *
+ * Admins may pass `?asEmployeeId=<id>` to view that employee's timecard read-only (the response's
+ * `viewingAs` field signals this to the client, which forces isEditable=false). No mutating route
+ * accepts this param — the acting identity for every write is always the caller's own session.
+ */
 export async function GET(req: NextRequest) {
   const session = await auth();
   if (!session?.user?.email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const { data: user, error: userError } = await supabaseAdmin
-    .from("users")
-    .select("id, pay_frequency")
-    .eq("email", session.user.email)
-    .maybeSingle();
+  const asEmployeeId = req.nextUrl.searchParams.get("asEmployeeId");
+  let user: { id: string; pay_frequency: string };
+  let viewingAs: { id: string; name: string | null; email: string } | null = null;
 
-  if (userError || !user) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
+  if (asEmployeeId) {
+    if (session.user.role !== "admin") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    const { data: targetUser, error: targetError } = await supabaseAdmin
+      .from("users")
+      .select("id, name, email, pay_frequency, role")
+      .eq("id", asEmployeeId)
+      .maybeSingle();
+
+    if (targetError || !targetUser || targetUser.role !== "employee") {
+      return NextResponse.json({ error: "Employee not found" }, { status: 404 });
+    }
+
+    console.log(`[view-as] admin ${session.user.email} viewed employee ${targetUser.id}'s timecard`);
+    user = { id: targetUser.id, pay_frequency: targetUser.pay_frequency };
+    viewingAs = { id: targetUser.id, name: targetUser.name, email: targetUser.email };
+  } else {
+    const { data: ownUser, error: userError } = await supabaseAdmin
+      .from("users")
+      .select("id, pay_frequency")
+      .eq("email", session.user.email)
+      .maybeSingle();
+
+    if (userError || !ownUser) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+    user = ownUser;
   }
 
   let weekStart;
@@ -80,6 +111,7 @@ export async function GET(req: NextRequest) {
     pay_period: payPeriod,
     rates: rates ?? [],
     pay_frequency: user.pay_frequency,
+    viewingAs,
   });
 }
 
