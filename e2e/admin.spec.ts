@@ -100,7 +100,7 @@ test.describe("Admin page", () => {
 
   test("To Review tab: shows submitted timecards with approve/reject buttons", async ({ page }) => {
     await expect(page.getByTestId("panel-review")).toBeVisible();
-    await expect(page.getByText("Alex Rivera")).toBeVisible();
+    await expect(page.getByTestId("panel-review").getByText("Alex Rivera")).toBeVisible();
     // Expand the card
     await page.getByTestId("panel-review").getByText("Alex Rivera").click();
     const panel = page.getByTestId("panel-review");
@@ -117,7 +117,7 @@ test.describe("Admin page", () => {
   test("Approved tab: shows approved timecards without approve/reject buttons", async ({ page }) => {
     await page.getByTestId("tab-approved").click();
     await expect(page.getByTestId("panel-approved")).toBeVisible();
-    await expect(page.getByText("Alex Rivera")).toBeVisible();
+    await expect(page.getByTestId("panel-approved").getByText("Alex Rivera")).toBeVisible();
     // Expand the card
     await page.getByTestId("panel-approved").getByText("Alex Rivera").click();
     const panel = page.getByTestId("panel-approved");
@@ -127,11 +127,12 @@ test.describe("Admin page", () => {
 
   test("Manage Users tab: lists employees with rate counts", async ({ page }) => {
     await page.getByTestId("tab-users").click();
-    await expect(page.getByTestId("manage-users-panel")).toBeVisible();
-    await expect(page.getByText("Alex Rivera")).toBeVisible();
-    await expect(page.getByText("Jordan Lee")).toBeVisible();
-    await expect(page.getByText("2 rates")).toBeVisible();
-    await expect(page.getByText("0 rates")).toBeVisible();
+    const panel = page.getByTestId("manage-users-panel");
+    await expect(panel).toBeVisible();
+    await expect(panel.getByText("Alex Rivera")).toBeVisible();
+    await expect(panel.getByText("Jordan Lee")).toBeVisible();
+    await expect(panel.getByText("2 rates")).toBeVisible();
+    await expect(panel.getByText("0 rates")).toBeVisible();
   });
 
   test("Manage Users: expanding employee shows rate profiles and add form", async ({ page }) => {
@@ -196,5 +197,70 @@ test.describe("Admin page", () => {
     await page.getByTestId("tab-users").click();
     await page.getByTestId(`employee-row-${MOCK_EMPLOYEE_JORDAN.id}`).click();
     await expect(page.getByText("No rates configured yet.")).toBeVisible();
+  });
+});
+
+test.describe("View as employee (admin)", () => {
+  test.beforeEach(async ({ context, page }) => {
+    await setAuthCookie(context, ADMIN_USER);
+
+    await page.route("**/api/admin/employees", async (route) => {
+      if (route.request().method() === "GET" && !route.request().url().includes("/rates")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ employees: [MOCK_EMPLOYEE_ALEX, MOCK_EMPLOYEE_JORDAN] }),
+        });
+      } else {
+        await route.fallback();
+      }
+    });
+
+    await page.route("**/api/timecard**", async (route) => {
+      if (route.request().method() !== "GET" || route.request().url().includes("/submit")) {
+        await route.fallback();
+        return;
+      }
+      const url = new URL(route.request().url());
+      const asEmployeeId = url.searchParams.get("asEmployeeId");
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          timecard: { id: "tc-1", status: "draft", employee_id: asEmployeeId ?? "self", pay_period_id: "pp-1" },
+          entries: [],
+          pay_period: { id: "pp-1", start_date: CURRENT_WEEK_START, end_date: CURRENT_WEEK_END, status: "open", frequency: "weekly", created_at: "" },
+          rates: [],
+          pay_frequency: "weekly",
+          viewingAs: asEmployeeId
+            ? { id: MOCK_EMPLOYEE_ALEX.id, name: MOCK_EMPLOYEE_ALEX.name, email: MOCK_EMPLOYEE_ALEX.email }
+            : null,
+        }),
+      });
+    });
+
+    await page.goto("/admin");
+  });
+
+  test("selecting an employee from the header dropdown opens their read-only dashboard", async ({ page }) => {
+    const timecardRequest = page.waitForRequest(
+      (req) => req.url().includes(`/api/timecard`) && req.url().includes(`asEmployeeId=${MOCK_EMPLOYEE_ALEX.id}`)
+    );
+
+    await page.getByTestId("view-as-select").selectOption(MOCK_EMPLOYEE_ALEX.id);
+    await expect(page).toHaveURL(new RegExp(`/dashboard\\?asEmployeeId=${MOCK_EMPLOYEE_ALEX.id}`));
+    await timecardRequest;
+
+    await expect(page.getByTestId("view-as-banner")).toBeVisible();
+    await expect(page.getByTestId("view-as-banner")).toContainText(MOCK_EMPLOYEE_ALEX.name);
+
+    // No add-entry affordance anywhere in the (empty) read-only period.
+    await expect(page.getByTestId(`add-entry-${CURRENT_WEEK_START}`)).not.toBeVisible();
+  });
+
+  test("the dropdown never renders for a non-admin session", async ({ context, page }) => {
+    await setAuthCookie(context, { email: "employee@example.com", name: "Employee User", role: "employee" });
+    await page.goto("/dashboard");
+    await expect(page.getByTestId("view-as-select")).not.toBeVisible();
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import type { Timecard, TimeEntry, PayPeriod, EmployeeRate, PayFrequency } from "@/types";
 import { getWeekStart } from "@/lib/pay-periods";
 import TimecardEntryTable, { calcHours, type EntryDraft } from "./TimecardEntryTable";
@@ -12,6 +13,8 @@ interface DashboardData {
   rates: EmployeeRate[];
   /** Absent on older responses — treated the same as "weekly". */
   pay_frequency?: PayFrequency;
+  /** Set when an admin is viewing this timecard via ?asEmployeeId=, forcing read-only rendering. */
+  viewingAs: { id: string; name: string | null; email: string } | null;
 }
 
 const STATUS_LABELS: Record<Timecard["status"], string> = {
@@ -85,7 +88,10 @@ function entriesToDraftMap(entries: TimeEntry[]): Record<string, EntryDraft[]> {
   return map;
 }
 
-export default function DashboardPage() {
+function DashboardContent() {
+  const searchParams = useSearchParams();
+  const asEmployeeId = searchParams.get("asEmployeeId");
+
   const [weekOffset, setWeekOffset] = useState(0);
   /** Semi-monthly equivalent of weekOffset: 0 = current period, -1 = one period back, etc. Unused (stays 0) in weekly mode. */
   const [periodOffset, setPeriodOffset] = useState(0);
@@ -110,7 +116,8 @@ export default function DashboardPage() {
 
     setLoading(true);
     try {
-      const res = await fetch(`/api/timecard?week=${week}`, { signal: controller.signal });
+      const url = `/api/timecard?week=${week}${asEmployeeId ? `&asEmployeeId=${asEmployeeId}` : ""}`;
+      const res = await fetch(url, { signal: controller.signal });
       if (res.ok) {
         const json = (await res.json()) as DashboardData;
         setData(json);
@@ -120,7 +127,7 @@ export default function DashboardPage() {
       if ((e as Error).name === "AbortError") return;
     }
     setLoading(false);
-  }, []);
+  }, [asEmployeeId]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -167,7 +174,8 @@ export default function DashboardPage() {
 
   const isEditable =
     (data?.timecard.status === "draft" || data?.timecard.status === "rejected") &&
-    data?.pay_period.status !== "closed";
+    data?.pay_period.status !== "closed" &&
+    !data?.viewingAs;
 
   const patchEntry = useCallback(async (entryId: string, values: Partial<EntryDraft>) => {
     await fetch(`/api/timecard/entry/${entryId}`, {
@@ -320,10 +328,22 @@ export default function DashboardPage() {
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-8">
+      {/* View-as banner */}
+      {data.viewingAs && (
+        <div
+          data-testid="view-as-banner"
+          className="mb-4 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-4 py-3 text-sm text-amber-800 dark:text-amber-300"
+        >
+          Viewing <strong>{data.viewingAs.name ?? data.viewingAs.email}</strong>&apos;s timecard as admin — read-only.
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">My Timecard</h1>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+            {data.viewingAs ? `${data.viewingAs.name ?? "Employee"}'s Timecard` : "My Timecard"}
+          </h1>
           <div className="flex items-center gap-1 mt-1">
             <button
               onClick={() => (isSemiMonthly ? navigatePeriod(-1) : navigateWeek(-1))}
@@ -452,5 +472,19 @@ export default function DashboardPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center h-64">
+          <span className="text-gray-400 dark:text-gray-500">Loading timecard…</span>
+        </div>
+      }
+    >
+      <DashboardContent />
+    </Suspense>
   );
 }
