@@ -96,6 +96,24 @@ gh pr create --title "type: description" --fill
 
 `main` is protected: the `Tests` CI check must pass before merging. On merge to main, the `Migrate DB` workflow (`db-migrate.yml`) automatically applies any migration files to production. Vercel auto-deploys on merge to `main`.
 
+### Test against live data on `staging` before merging to main
+
+PRs still target `main` as above — `ci.yml`'s `Tests` job only triggers on `push`/`pull_request` to `main`, so retargeting a PR's base branch would silently skip CI. Instead, **before merging a PR**, merge its branch into `staging` and push:
+
+```bash
+git fetch origin
+git checkout -B staging origin/staging
+git merge --no-ff feat/description
+git push origin staging
+git checkout feat/description   # switch back
+```
+
+This deploys to `https://payroll-agent-git-staging-michael-kuo-s-projects.vercel.app` — Vercel's automatic "Git Branch URL" for whatever branch is named `staging`. **This is the only non-production URL registered in Google Cloud Console's OAuth redirect URIs**, so it's the only preview environment where Google sign-in actually works; a plain per-branch/per-PR preview URL will fail sign-in with `redirect_uri_mismatch`. Once verified there, merge the original PR into `main` as normal — no separate "promote" PR needed.
+
+Two things to know about this `staging` branch:
+- It shares the **exact same production Supabase database** as `main` (there's no separate staging project) — treat any action taken there as a real write to production data, not a sandbox.
+- Since `db-migrate.yml` only applies migrations on merge to `main`, a PR that adds a new migration won't have that schema live on `staging` until after it's merged to `main` — schema-dependent behavior can't be fully verified pre-merge this way.
+
 ---
 
 ## Testing rules
