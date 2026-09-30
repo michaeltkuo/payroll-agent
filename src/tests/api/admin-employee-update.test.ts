@@ -6,10 +6,21 @@ import { NextRequest } from "next/server";
 
 vi.mock("@/auth", () => ({ auth: vi.fn() }));
 vi.mock("@/lib/supabase", () => ({ supabaseAdmin: { from: vi.fn() } }));
+vi.mock("@/lib/pay-periods", () => ({
+  reconcileDraftTimecardsForFrequencyChange: vi.fn(),
+}));
 
 import { PATCH } from "@/app/api/admin/employees/[id]/route";
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
+import { reconcileDraftTimecardsForFrequencyChange } from "@/lib/pay-periods";
+
+const MOCK_RECONCILIATION = {
+  entriesMoved: 0,
+  timecardsDeleted: 0,
+  periodsTouched: 0,
+  skipped: [],
+};
 
 const MOCK_ADMIN_SESSION = { user: { email: "admin@example.com", role: "admin" } };
 const MOCK_EMPLOYEE_SESSION = { user: { email: "emp@example.com", role: "employee" } };
@@ -53,7 +64,10 @@ function makePatchRequest(body: Record<string, unknown>) {
   });
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(reconcileDraftTimecardsForFrequencyChange).mockResolvedValue(MOCK_RECONCILIATION);
+});
 
 describe("PATCH /api/admin/employees/[id]", () => {
   it("returns 401 when not authenticated", async () => {
@@ -91,8 +105,9 @@ describe("PATCH /api/admin/employees/[id]", () => {
       makeFrom({ data: { ...MOCK_EMPLOYEE, pay_frequency: freq }, error: null });
       const res = await PATCH(makePatchRequest({ pay_frequency: freq }), makeParams("emp-1"));
       expect(res.status).toBe(200);
-      const json = (await res.json()) as { employee: typeof MOCK_EMPLOYEE };
+      const json = (await res.json()) as { employee: typeof MOCK_EMPLOYEE; reconciliation: unknown };
       expect(json.employee.pay_frequency).toBe(freq);
+      expect(json.reconciliation).toEqual(MOCK_RECONCILIATION);
     }
   );
 
@@ -104,6 +119,24 @@ describe("PATCH /api/admin/employees/[id]", () => {
     expect(fromFn).toHaveBeenCalledWith("users");
     expect(chain.update).toHaveBeenCalledWith({ pay_frequency: "monthly" });
     expect(chain.eq).toHaveBeenCalledWith("id", "emp-1");
+  });
+
+  it("reconciles the employee's draft/rejected timecards for the new frequency", async () => {
+    vi.mocked(auth).mockResolvedValue(MOCK_ADMIN_SESSION as never);
+    makeFrom({ data: MOCK_EMPLOYEE, error: null });
+    await PATCH(makePatchRequest({ pay_frequency: "monthly" }), makeParams("emp-1"));
+    expect(reconcileDraftTimecardsForFrequencyChange).toHaveBeenCalledWith(
+      supabaseAdmin,
+      "emp-1",
+      "monthly"
+    );
+  });
+
+  it("does not reconcile when the employee update fails or is not found", async () => {
+    vi.mocked(auth).mockResolvedValue(MOCK_ADMIN_SESSION as never);
+    makeFrom({ data: null, error: null });
+    await PATCH(makePatchRequest({ pay_frequency: "weekly" }), makeParams("missing-id"));
+    expect(reconcileDraftTimecardsForFrequencyChange).not.toHaveBeenCalled();
   });
 
   it("returns 404 when the employee does not exist", async () => {

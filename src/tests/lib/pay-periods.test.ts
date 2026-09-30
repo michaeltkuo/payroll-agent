@@ -8,6 +8,8 @@ import {
   getPeriodBoundsForFrequency,
   parseWeekParam,
   getPayPeriodForEmployee,
+  getOrCreateTimecard,
+  reconcileDraftTimecardsForFrequencyChange,
 } from "@/lib/pay-periods";
 
 // ---------------------------------------------------------------------------
@@ -264,7 +266,7 @@ describe("parseWeekParam", () => {
 // pattern used in src/tests/api/*.test.ts)
 // ---------------------------------------------------------------------------
 function makeChain(value: { data: unknown; error: unknown }) {
-  const methods = ["select", "eq", "insert", "order"] as const;
+  const methods = ["select", "eq", "in", "insert", "upsert", "update", "delete", "order"] as const;
   const builder: Record<string, unknown> = {};
 
   for (const m of methods) {
@@ -425,5 +427,294 @@ describe("getPayPeriodForEmployee", () => {
       });
       expect(result).toEqual(mockSemiMonthlyPeriod);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getOrCreateTimecard
+// ---------------------------------------------------------------------------
+describe("getOrCreateTimecard", () => {
+  const MOCK_TIMECARD = {
+    id: "tc-uuid",
+    employee_id: "emp-1",
+    pay_period_id: "pp-uuid",
+    status: "draft",
+  };
+
+  function buildSupabase(...values: Array<{ data: unknown; error: unknown }>) {
+    return { from: makeFrom(...values) } as unknown as SupabaseClient;
+  }
+
+  it("returns the row directly when the upsert resolves it", async () => {
+    const supabase = buildSupabase({ data: MOCK_TIMECARD, error: null });
+    const result = await getOrCreateTimecard(supabase, "emp-1", "pp-uuid");
+    expect(result).toEqual(MOCK_TIMECARD);
+
+    const fromFn = vi.mocked(supabase.from);
+    expect(fromFn).toHaveBeenCalledTimes(1);
+    const chain = fromFn.mock.results[0].value as ReturnType<typeof makeChain>;
+    expect(chain.upsert).toHaveBeenCalledWith(
+      { employee_id: "emp-1", pay_period_id: "pp-uuid" },
+      { onConflict: "employee_id,pay_period_id", ignoreDuplicates: true }
+    );
+  });
+
+  it("falls back to a SELECT when the upsert returns nothing (duplicate ignored)", async () => {
+    const supabase = buildSupabase(
+      { data: null, error: null }, // upsert → ignored duplicate
+      { data: MOCK_TIMECARD, error: null } // fallback SELECT
+    );
+    const result = await getOrCreateTimecard(supabase, "emp-1", "pp-uuid");
+    expect(result).toEqual(MOCK_TIMECARD);
+    expect(vi.mocked(supabase.from)).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when both the upsert and the fallback SELECT fail", async () => {
+    const supabase = buildSupabase(
+      { data: null, error: { message: "upsert failed" } },
+      { data: null, error: { message: "select failed" } }
+    );
+    await expect(getOrCreateTimecard(supabase, "emp-1", "pp-uuid")).rejects.toThrow(
+      "Failed to get or create timecard: upsert failed"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reconcileDraftTimecardsForFrequencyChange
+// ---------------------------------------------------------------------------
+describe("reconcileDraftTimecardsForFrequencyChange", () => {
+  function buildSupabase(...values: Array<{ data: unknown; error: unknown }>) {
+    return { from: makeFrom(...values) } as unknown as SupabaseClient;
+  }
+
+  const emptySummary = { entriesMoved: 0, timecardsDeleted: 0, periodsTouched: 0, skipped: [] };
+
+  it("returns an empty summary when the employee has no old-frequency draft/rejected timecards", async () => {
+    const supabase = buildSupabase({ data: [], error: null });
+    const result = await reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly");
+    expect(result).toEqual(emptySummary);
+  });
+
+  it("ignores a draft timecard whose pay_period already matches the new frequency", async () => {
+    const alreadyCorrect = {
+      id: "tc-current",
+      status: "draft",
+      pay_period: { id: "pp-current", start_date: "2026-09-16", end_date: "2026-09-30", frequency: "semi_monthly" },
+      entries: [{ id: "entry-1", work_date: "2026-09-20", entry_order: 0 }],
+    };
+    const supabase = buildSupabase({ data: [alreadyCorrect], error: null });
+    const result = await reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly");
+    expect(result).toEqual(emptySummary);
+    expect(vi.mocked(supabase.from)).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when the initial timecards query fails", async () => {
+    const supabase = buildSupabase({ data: null, error: { message: "connection refused" } });
+    await expect(
+      reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly")
+    ).rejects.toThrow("Failed to load timecards for reconciliation: connection refused");
+  });
+
+  it("moves entries into the new period and deletes the emptied source timecard", async () => {
+    // A weekly draft (Sep 13–19) with one entry on Sep 16, now that the
+    // employee is semi_monthly (period should become Sep 16–30).
+    const sourceTimecard = {
+      id: "tc-old",
+      status: "draft",
+      pay_period: { id: "pp-old", start_date: "2026-09-13", end_date: "2026-09-19", frequency: "weekly" },
+      entries: [{ id: "entry-1", work_date: "2026-09-16", entry_order: 0 }],
+    };
+    const targetPeriod = {
+      id: "pp-new",
+      start_date: "2026-09-16",
+      end_date: "2026-09-30",
+      status: "open",
+      frequency: "semi_monthly",
+      created_at: "2026-09-16T00:00:00Z",
+    };
+    const targetTimecard = { id: "tc-new", employee_id: "emp-1", pay_period_id: "pp-new", status: "draft" };
+
+    const supabase = buildSupabase(
+      { data: [sourceTimecard], error: null }, // 1. load source timecards
+      { data: targetPeriod, error: null }, // 2. getPayPeriodForEmployee → found
+      { data: targetTimecard, error: null }, // 3. getOrCreateTimecard → upsert resolves it
+      { data: [], error: null }, // 4. existing entries already in target
+      { data: null, error: null }, // 5. move entry-1 → target
+      { data: null, error: null }, // 6. re-point notifications
+      { data: null, error: null } // 7. delete emptied source timecard
+    );
+
+    const result = await reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly");
+
+    expect(result).toEqual({
+      entriesMoved: 1,
+      timecardsDeleted: 1,
+      periodsTouched: 1,
+      skipped: [],
+    });
+
+    const fromFn = vi.mocked(supabase.from);
+    const moveChain = fromFn.mock.results[4].value as ReturnType<typeof makeChain>;
+    expect(moveChain.update).toHaveBeenCalledWith({ timecard_id: "tc-new", entry_order: 0 });
+    expect(moveChain.eq).toHaveBeenCalledWith("id", "entry-1");
+
+    const notifyChain = fromFn.mock.results[5].value as ReturnType<typeof makeChain>;
+    expect(notifyChain.update).toHaveBeenCalledWith({ timecard_id: "tc-new" });
+    expect(notifyChain.eq).toHaveBeenCalledWith("timecard_id", "tc-old");
+
+    const deleteChain = fromFn.mock.results[6].value as ReturnType<typeof makeChain>;
+    expect(deleteChain.delete).toHaveBeenCalled();
+    expect(deleteChain.eq).toHaveBeenCalledWith("id", "tc-old");
+  });
+
+  it("throws when moving an entry to its target timecard fails", async () => {
+    const sourceTimecard = {
+      id: "tc-old",
+      status: "draft",
+      pay_period: { id: "pp-old", start_date: "2026-09-13", end_date: "2026-09-19", frequency: "weekly" },
+      entries: [{ id: "entry-1", work_date: "2026-09-16", entry_order: 0 }],
+    };
+    const targetPeriod = {
+      id: "pp-new",
+      start_date: "2026-09-16",
+      end_date: "2026-09-30",
+      status: "open",
+      frequency: "semi_monthly",
+      created_at: "2026-09-16T00:00:00Z",
+    };
+    const targetTimecard = { id: "tc-new", employee_id: "emp-1", pay_period_id: "pp-new", status: "draft" };
+
+    const supabase = buildSupabase(
+      { data: [sourceTimecard], error: null },
+      { data: targetPeriod, error: null },
+      { data: targetTimecard, error: null },
+      { data: [], error: null },
+      { data: null, error: { message: "row locked" } } // move fails
+    );
+
+    await expect(
+      reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly")
+    ).rejects.toThrow("Failed to move entry entry-1: row locked");
+  });
+
+  it("continues entry_order after whatever already exists in the target for that date", async () => {
+    const sourceTimecard = {
+      id: "tc-old",
+      status: "draft",
+      pay_period: { id: "pp-old", start_date: "2026-09-13", end_date: "2026-09-19", frequency: "weekly" },
+      entries: [{ id: "entry-2", work_date: "2026-09-16", entry_order: 0 }],
+    };
+    const targetPeriod = {
+      id: "pp-new",
+      start_date: "2026-09-16",
+      end_date: "2026-09-30",
+      status: "open",
+      frequency: "semi_monthly",
+      created_at: "2026-09-16T00:00:00Z",
+    };
+    // Target already has a draft entry for Sep 16 at entry_order 0 (e.g. the
+    // employee already logged a second shift directly under the new period).
+    const targetTimecard = { id: "tc-new", employee_id: "emp-1", pay_period_id: "pp-new", status: "draft" };
+
+    const supabase = buildSupabase(
+      { data: [sourceTimecard], error: null },
+      { data: targetPeriod, error: null },
+      { data: targetTimecard, error: null },
+      { data: [{ work_date: "2026-09-16", entry_order: 0 }], error: null }, // existing entry already in target
+      { data: null, error: null }, // move entry-2
+      { data: null, error: null }, // re-point notifications
+      { data: null, error: null } // delete emptied source
+    );
+
+    await reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly");
+
+    const fromFn = vi.mocked(supabase.from);
+    const moveChain = fromFn.mock.results[4].value as ReturnType<typeof makeChain>;
+    // Must not collide with the existing entry_order 0 already in the target.
+    expect(moveChain.update).toHaveBeenCalledWith({ timecard_id: "tc-new", entry_order: 1 });
+  });
+
+  it("merges entries from two old-frequency timecards into a single new-frequency target", async () => {
+    const sourceA = {
+      id: "tc-old-a",
+      status: "draft",
+      pay_period: { id: "pp-old-a", start_date: "2026-09-01", end_date: "2026-09-07", frequency: "weekly" },
+      entries: [{ id: "entry-a", work_date: "2026-09-05", entry_order: 0 }],
+    };
+    const sourceB = {
+      id: "tc-old-b",
+      status: "rejected",
+      pay_period: { id: "pp-old-b", start_date: "2026-09-08", end_date: "2026-09-14", frequency: "weekly" },
+      entries: [{ id: "entry-b", work_date: "2026-09-10", entry_order: 0 }],
+    };
+    const targetPeriod = {
+      id: "pp-new",
+      start_date: "2026-09-01",
+      end_date: "2026-09-15",
+      status: "open",
+      frequency: "semi_monthly",
+      created_at: "2026-09-01T00:00:00Z",
+    };
+    const targetTimecard = { id: "tc-new", employee_id: "emp-1", pay_period_id: "pp-new", status: "draft" };
+
+    const supabase = buildSupabase(
+      { data: [sourceA, sourceB], error: null }, // load both source timecards
+      { data: targetPeriod, error: null }, // one shared target period
+      { data: targetTimecard, error: null }, // one shared target timecard
+      { data: [], error: null }, // no pre-existing entries in target
+      { data: null, error: null }, // move entry-a
+      { data: null, error: null }, // move entry-b
+      { data: null, error: null }, // re-point notifications for source A
+      { data: null, error: null }, // delete source A
+      { data: null, error: null }, // re-point notifications for source B
+      { data: null, error: null } // delete source B
+    );
+
+    const result = await reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly");
+
+    expect(result.entriesMoved).toBe(2);
+    expect(result.timecardsDeleted).toBe(2);
+    expect(result.periodsTouched).toBe(1); // both merged into the SAME target period
+  });
+
+  it("skips merging into a target timecard that is already finalized", async () => {
+    const sourceTimecard = {
+      id: "tc-old",
+      status: "draft",
+      pay_period: { id: "pp-old", start_date: "2026-09-13", end_date: "2026-09-19", frequency: "weekly" },
+      entries: [{ id: "entry-1", work_date: "2026-09-16", entry_order: 0 }],
+    };
+    const targetPeriod = {
+      id: "pp-new",
+      start_date: "2026-09-16",
+      end_date: "2026-09-30",
+      status: "open",
+      frequency: "semi_monthly",
+      created_at: "2026-09-16T00:00:00Z",
+    };
+    // The employee already has an APPROVED semi-monthly timecard for this window.
+    const finalizedTargetTimecard = {
+      id: "tc-approved",
+      employee_id: "emp-1",
+      pay_period_id: "pp-new",
+      status: "approved",
+    };
+
+    const supabase = buildSupabase(
+      { data: [sourceTimecard], error: null },
+      { data: targetPeriod, error: null },
+      { data: finalizedTargetTimecard, error: null }
+    );
+
+    const result = await reconcileDraftTimecardsForFrequencyChange(supabase, "emp-1", "semi_monthly");
+
+    expect(result.entriesMoved).toBe(0);
+    expect(result.timecardsDeleted).toBe(0);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0].payPeriodId).toBe("pp-new");
+
+    // Never touched time_entries/notifications/timecards beyond the 3 lookup calls.
+    expect(vi.mocked(supabase.from)).toHaveBeenCalledTimes(3);
   });
 });

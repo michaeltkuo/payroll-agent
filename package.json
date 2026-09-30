@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "backfill:pay-frequency": "tsx scripts/backfill-pay-frequency-migration.ts",
     "prepare": "husky"
   },
   "dependencies": {
@@ -45,6 +46,7 @@
     "husky": "^9.1.7",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4",
+    "tsx": "^4.19.2",
     "typescript": "^5",
     "vitest": "^4.1.6"
   }

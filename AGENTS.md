@@ -30,6 +30,8 @@ Weekly timecard management for employees and admins:
   - `getPeriodBoundsForFrequency(frequency: string, referenceDate: Date): { start_date, end_date }` — dispatches to one of the three calculators above by frequency; throws on an unrecognized frequency
   - `getPayPeriodForEmployee(supabase, employee: { pay_frequency: string }, referenceDate: Date): Promise<PayPeriod>` — finds or creates the DB row for that employee's frequency and period, tagging created rows with `frequency` — always use this, never query `pay_periods` directly in route handlers. **Replaces the old `getPayPeriodForWeek(supabase, weekStart)`, which no longer exists.**
   - `parseWeekParam(weekStr: string | null | undefined, frequency: string = "weekly"): Date` — validates a `?week=YYYY-MM-DD` param and normalizes it to the start of the period implied by `frequency` (Sunday for weekly, the 1st/16th for semi_monthly, the 1st for monthly); defaults to today's period when `weekStr` is absent — always call this on incoming week params before using them
+  - `getOrCreateTimecard(supabase, employeeId: string, payPeriodId: string): Promise<Timecard>` — finds or creates the draft timecard for that (employee, pay period) pair; used by `GET /api/timecard` and by the reconciliation below
+  - `reconcileDraftTimecardsForFrequencyChange(supabase, employeeId: string, newFrequency: string): Promise<ReconciliationSummary>` — when an employee's `pay_frequency` changes, their still-editable (`draft`/`rejected`) timecards stay attached to `pay_periods` rows tagged with the OLD frequency and become invisible to every future read/write. This reassigns those entries onto the correct new-frequency period/timecard and deletes the emptied source timecard. Submitted/approved/sent_to_payroll history is never touched (it's already surfaced correctly by `GET /api/admin/payroll-runs`, which matches by date overlap, not by current frequency). Called automatically by `PATCH /api/admin/employees/[id]` — see below.
 
 ### API routes accept a `week` param
 - `GET /api/timecard?week=YYYY-MM-DD` — omit for current week (or current period, for a non-weekly employee); response includes `rates` array and a top-level `pay_frequency` field so the dashboard knows which nav mode to render
@@ -60,7 +62,7 @@ Weekly timecard management for employees and admins:
 - `isEditable` requires BOTH `timecard.status in [draft, rejected]` AND `pay_period.status === "open"`
 
 ### Admin: pay frequency, payroll runs, and notifications
-- `PATCH /api/admin/employees/[id]` body `{ pay_frequency: "weekly" | "semi_monthly" | "monthly" }` — admin-only; this is the only way an employee's pay frequency changes (no migration should ever hardcode a specific employee's frequency)
+- `PATCH /api/admin/employees/[id]` body `{ pay_frequency: "weekly" | "semi_monthly" | "monthly" }` — admin-only; this is the only way an employee's pay frequency changes (no migration should ever hardcode a specific employee's frequency). Response is `{ employee, reconciliation }`: it also runs `reconcileDraftTimecardsForFrequencyChange` in the same request so in-progress entries under the old frequency don't silently disappear from the employee's dashboard
 - `GET /api/admin/payroll-runs?date=YYYY-MM-DD` (default: today) — admin-only; computes the semi-monthly run window containing `date` and returns every employee with the timecard(s) overlapping that window, across mixed frequencies (`{ runStart, runEnd, employees: [{ employeeId, name, payFrequency, timecards: [...] }] }`). A monthly employee's timecard is attributed only to the run whose window starts on the same day the monthly period does (the 1st–15th run), not both halves of the month — see the route's own comment before changing the overlap query
 - `GET /api/admin/notifications` / `PATCH /api/admin/notifications` (`{ id }` or `{ markAll: true }`) — admin-only, scoped to the caller's own `notifications` rows; backs the notification bell in `src/app/admin/page.tsx`, which polls every 45s
 - The Inngest function `notifyAdminOnTimecardSubmitted` (`src/inngest/notifications.ts`) listens for `payroll/timecard.submitted` and emails `ADMIN_EMAIL` via Resend — requires `RESEND_API_KEY` (and optionally `NEXT_PUBLIC_APP_URL`) to be set; see README.md's Environment Variables section
@@ -93,6 +95,26 @@ gh pr create --title "type: description" --fill
 **Always include the Co-authored-by trailer in commits.**
 
 `main` is protected: the `Tests` CI check must pass before merging. On merge to main, the `Migrate DB` workflow (`db-migrate.yml`) automatically applies any migration files to production. Vercel auto-deploys on merge to `main`.
+
+### Test against live data on `staging` before merging to main
+
+PRs still target `main` as above — `ci.yml`'s `Tests` job only triggers on `push`/`pull_request` to `main`, so retargeting a PR's base branch would silently skip CI. Instead, **before merging a PR**, merge its branch into `staging` and push:
+
+```bash
+git fetch origin
+git checkout -B staging origin/staging
+git merge --no-ff feat/description
+git push origin staging
+git checkout feat/description   # switch back
+```
+
+This deploys to `https://payroll-agent-git-staging-michael-kuo-s-projects.vercel.app` — Vercel's automatic "Git Branch URL" for whatever branch is named `staging`. **This is the only non-production URL registered in Google Cloud Console's OAuth redirect URIs**, so it's the only preview environment where Google sign-in actually works; a plain per-branch/per-PR preview URL will fail sign-in with `redirect_uri_mismatch`. Once verified there, merge the original PR into `main` as normal — no separate "promote" PR needed.
+
+Two things to know about this `staging` branch:
+- It shares the **exact same production Supabase database** as `main` (there's no separate staging project) — treat any action taken there as a real write to production data, not a sandbox.
+- Since `db-migrate.yml` only applies migrations on merge to `main`, a PR that adds a new migration won't have that schema live on `staging` until after it's merged to `main` — schema-dependent behavior can't be fully verified pre-merge this way.
+
+**Gotcha:** in the Vercel dashboard's Deployments list, the "Preview" button on a given row always opens *that specific deployment's* own one-off URL (e.g. `payroll-agent-4klbsd3e2-...vercel.app`), never the stable `payroll-agent-git-staging-...` alias — even for the row whose branch is `staging`. Only the alias URL above is OAuth-whitelisted; always navigate there directly (or use `list_deployment_aliases` via the Vercel MCP tools to confirm which deployment it currently points to) rather than clicking through from the deployments list.
 
 ---
 
