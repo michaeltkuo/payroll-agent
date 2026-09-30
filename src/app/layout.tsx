@@ -5,6 +5,7 @@ import { auth } from "@/auth";
 import { signOut } from "@/auth";
 import Providers from "@/components/SessionProvider";
 import ThemeToggle from "@/components/ThemeToggle";
+import ViewAsSelector from "@/components/ViewAsSelector";
 import Link from "next/link";
 
 const geistSans = Geist({
@@ -57,6 +58,7 @@ export default async function RootLayout({
                   )}
                 </div>
                 <div className="flex items-center gap-3">
+                  {session.user.role === "admin" && <ViewAsSelector />}
                   <ThemeToggle />
                   {session.user.image && (
                     // eslint-disable-next-line @next/next/no-img-element

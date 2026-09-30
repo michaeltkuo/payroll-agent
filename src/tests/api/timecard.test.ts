@@ -145,6 +145,7 @@ describe("GET /api/timecard", () => {
     expect(body.entries).toEqual(MOCK_ENTRIES);
     expect(body.rates).toEqual([]);
     expect(body.pay_frequency).toBe("weekly");
+    expect(body.viewingAs).toBeNull();
   });
 
   it("accepts a ?week= param and calls getPayPeriodForEmployee with the normalised Sunday", async () => {
@@ -245,6 +246,74 @@ describe("GET /api/timecard", () => {
     const req = new NextRequest("http://localhost/api/timecard");
     const res = await GET(req);
     expect(res.status).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/timecard?asEmployeeId= (admin "view as" override)
+// ---------------------------------------------------------------------------
+describe("GET /api/timecard — ?asEmployeeId (admin view-as)", () => {
+  const MOCK_ADMIN_SESSION = { user: { email: "admin@example.com", role: "admin" } };
+  const MOCK_EMPLOYEE_SESSION = { user: { email: "employee@example.com", role: "employee" } };
+  const MOCK_TARGET_EMPLOYEE = {
+    id: "target-uuid",
+    name: "Kelly Jazwa",
+    email: "kelly@example.com",
+    pay_frequency: "weekly",
+    role: "employee",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getPayPeriodForEmployee).mockResolvedValue(MOCK_PAY_PERIOD as never);
+  });
+
+  it("returns 403 when a non-admin passes asEmployeeId", async () => {
+    vi.mocked(auth).mockResolvedValue(MOCK_EMPLOYEE_SESSION as never);
+    const req = new NextRequest("http://localhost/api/timecard?asEmployeeId=target-uuid");
+    const res = await GET(req);
+    expect(res.status).toBe(403);
+  });
+
+  it("returns 404 when the target id does not match any user", async () => {
+    vi.mocked(auth).mockResolvedValue(MOCK_ADMIN_SESSION as never);
+    makeFrom({ data: null, error: null }); // target lookup → not found
+    const req = new NextRequest("http://localhost/api/timecard?asEmployeeId=missing-id");
+    const res = await GET(req);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns 404 when the target id belongs to an admin, not an employee", async () => {
+    vi.mocked(auth).mockResolvedValue(MOCK_ADMIN_SESSION as never);
+    makeFrom({ data: { ...MOCK_TARGET_EMPLOYEE, role: "admin" }, error: null });
+    const req = new NextRequest("http://localhost/api/timecard?asEmployeeId=other-admin-id");
+    const res = await GET(req);
+    expect(res.status).toBe(404);
+  });
+
+  it("returns the target employee's timecard with viewingAs populated", async () => {
+    vi.mocked(auth).mockResolvedValue(MOCK_ADMIN_SESSION as never);
+    makeFrom(
+      { data: MOCK_TARGET_EMPLOYEE, error: null }, // target lookup
+      { data: MOCK_TIMECARD, error: null }, // timecard upsert
+      { data: MOCK_ENTRIES, error: null }, // entries query
+      { data: [], error: null }, // rates query
+    );
+
+    const req = new NextRequest("http://localhost/api/timecard?asEmployeeId=target-uuid");
+    const res = await GET(req);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.viewingAs).toEqual({
+      id: "target-uuid",
+      name: "Kelly Jazwa",
+      email: "kelly@example.com",
+    });
+    expect(body.pay_frequency).toBe("weekly");
+    expect(body.timecard).toEqual(MOCK_TIMECARD);
+
+    const [, employeeArg] = vi.mocked(getPayPeriodForEmployee).mock.calls[0];
+    expect(employeeArg).toEqual({ id: "target-uuid", pay_frequency: "weekly" });
   });
 });
 
