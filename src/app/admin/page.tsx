@@ -324,6 +324,35 @@ function EmployeeCard({ employee, onRatesChanged }: EmployeeCardProps) {
   const [error, setError] = useState<string | null>(null);
   const [savingFrequency, setSavingFrequency] = useState(false);
   const [frequencyError, setFrequencyError] = useState<string | null>(null);
+  const [migratingHistory, setMigratingHistory] = useState(false);
+  const [historyResult, setHistoryResult] = useState<string | null>(null);
+
+  const handleMigrateHistory = async () => {
+    setHistoryResult(null);
+    setMigratingHistory(true);
+    const res = await fetch(`/api/admin/employees/${employee.id}/reconcile-history`, {
+      method: "POST",
+    });
+    setMigratingHistory(false);
+    const json = (await res.json().catch(() => ({}))) as {
+      reconciliation?: {
+        entriesMoved: number;
+        timecardsUpdated: number;
+        timecardsDeleted: number;
+        skipped: unknown[];
+      };
+      error?: string;
+    };
+    if (res.ok && json.reconciliation) {
+      const r = json.reconciliation;
+      setHistoryResult(
+        `Moved ${r.entriesMoved} entr${r.entriesMoved === 1 ? "y" : "ies"} into ${r.timecardsUpdated} period${r.timecardsUpdated === 1 ? "" : "s"}, removed ${r.timecardsDeleted} old timecard${r.timecardsDeleted === 1 ? "" : "s"}${r.skipped.length > 0 ? `, skipped ${r.skipped.length}` : ""}.`
+      );
+      onRatesChanged();
+    } else {
+      setHistoryResult(json.error ?? "Failed to migrate history.");
+    }
+  };
 
   const handleFrequencyChange = async (pay_frequency: string) => {
     setFrequencyError(null);
@@ -410,6 +439,18 @@ function EmployeeCard({ employee, onRatesChanged }: EmployeeCardProps) {
               </option>
             ))}
           </select>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleMigrateHistory();
+            }}
+            disabled={migratingHistory}
+            data-testid={`migrate-history-btn-${employee.id}`}
+            title="One-time: fold approved/submitted history under the employee's OLD pay frequency into their current one"
+            className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-50 disabled:no-underline"
+          >
+            {migratingHistory ? "Migrating…" : "Migrate approved history"}
+          </button>
           <span className="text-xs text-gray-500 dark:text-gray-400">
             {employee.rates.length} {employee.rates.length === 1 ? "rate" : "rates"}
           </span>
@@ -423,6 +464,15 @@ function EmployeeCard({ employee, onRatesChanged }: EmployeeCardProps) {
           data-testid={`pay-frequency-error-${employee.id}`}
         >
           {frequencyError}
+        </p>
+      )}
+
+      {historyResult && (
+        <p
+          className="px-5 pb-3 -mt-1 text-xs text-gray-500 dark:text-gray-400"
+          data-testid={`migrate-history-result-${employee.id}`}
+        >
+          {historyResult}
         </p>
       )}
 
