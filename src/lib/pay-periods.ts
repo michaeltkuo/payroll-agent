@@ -383,3 +383,204 @@ export async function reconcileDraftTimecardsForFrequencyChange(
 
   return summary;
 }
+
+export interface FinalizedReconciliationSummary {
+  entriesMoved: number;
+  timecardsUpdated: number;
+  timecardsDeleted: number;
+  periodsTouched: number;
+  skipped: Array<{ payPeriodId: string; reason: string }>;
+}
+
+interface FinalizedSourceTimecard {
+  id: string;
+  status: string;
+  submitted_at: string | null;
+  approved_at: string | null;
+  pay_period: { id: string; start_date: string; end_date: string; frequency: string } | null;
+  entries: ReconcileTimeEntry[];
+}
+
+interface SourceMeta {
+  status: string;
+  submitted_at: string | null;
+  approved_at: string | null;
+}
+
+/**
+ * One-time migration companion to reconcileDraftTimecardsForFrequencyChange,
+ * for finalized (submitted/approved) history instead of in-progress drafts.
+ * Deliberately NOT wired into PATCH /api/admin/employees/[id] — approved
+ * payroll records shouldn't get silently re-merged every time an admin
+ * changes someone's frequency, so this is only ever invoked explicitly via
+ * POST /api/admin/employees/[id]/reconcile-history.
+ *
+ * `sent_to_payroll` timecards are never touched — they're tied 1:1 to an
+ * external Patriot Software submission recorded in `payroll_submissions`,
+ * and reassigning their entries would misrepresent what was actually sent.
+ *
+ * A target period's existing timecard is only folded into if it's an empty
+ * draft (the harmless auto-created placeholder) — anything else (already
+ * has entries, e.g. the employee is actively logging that period, or is
+ * itself already finalized) is skipped and reported, never overwritten.
+ * When a merge proceeds, the target's status becomes 'approved' only if
+ * every contributing source was 'approved'; otherwise 'submitted', so
+ * unreviewed work is never silently approved. submitted_at is the earliest
+ * across contributing sources, approved_at the latest (only set when the
+ * merged status is 'approved'), and rejection_note is dropped.
+ */
+export async function reconcileFinalizedTimecardsForFrequencyChange(
+  supabase: SupabaseClient,
+  employeeId: string,
+  newFrequency: string
+): Promise<FinalizedReconciliationSummary> {
+  const summary: FinalizedReconciliationSummary = {
+    entriesMoved: 0,
+    timecardsUpdated: 0,
+    timecardsDeleted: 0,
+    periodsTouched: 0,
+    skipped: [],
+  };
+
+  const { data: timecardsRaw, error } = await supabase
+    .from("timecards")
+    .select(
+      "id, status, submitted_at, approved_at, pay_period:pay_periods(id, start_date, end_date, frequency), entries:time_entries(id, work_date, entry_order)"
+    )
+    .eq("employee_id", employeeId)
+    .in("status", ["submitted", "approved"]);
+
+  if (error) {
+    throw new Error(`Failed to load timecards for reconciliation: ${error.message}`);
+  }
+
+  const sourceTimecards = ((timecardsRaw ?? []) as unknown as FinalizedSourceTimecard[]).filter(
+    (tc) => tc.pay_period && tc.pay_period.frequency !== newFrequency && tc.entries.length > 0
+  );
+
+  if (sourceTimecards.length === 0) return summary;
+
+  const groups = new Map<
+    string,
+    {
+      start_date: string;
+      end_date: string;
+      entries: { sourceTimecardId: string; entry: ReconcileTimeEntry }[];
+      sources: Map<string, SourceMeta>;
+    }
+  >();
+
+  for (const tc of sourceTimecards) {
+    for (const entry of tc.entries) {
+      const bounds = getPeriodBoundsForFrequency(newFrequency, new Date(`${entry.work_date}T00:00:00`));
+      const key = `${bounds.start_date}_${bounds.end_date}`;
+      if (!groups.has(key)) groups.set(key, { ...bounds, entries: [], sources: new Map() });
+      const group = groups.get(key)!;
+      group.entries.push({ sourceTimecardId: tc.id, entry });
+      group.sources.set(tc.id, { status: tc.status, submitted_at: tc.submitted_at, approved_at: tc.approved_at });
+    }
+  }
+
+  const movedBySource = new Map<string, Map<string, number>>();
+
+  for (const group of groups.values()) {
+    const targetPeriod = await getPayPeriodForEmployee(
+      supabase,
+      { pay_frequency: newFrequency },
+      new Date(`${group.start_date}T00:00:00`)
+    );
+    const targetTimecard = await getOrCreateTimecard(supabase, employeeId, targetPeriod.id);
+
+    const { data: existingTargetEntries } = await supabase
+      .from("time_entries")
+      .select("id")
+      .eq("timecard_id", targetTimecard.id);
+
+    const targetIsEmptyDraft =
+      targetTimecard.status === "draft" && (existingTargetEntries?.length ?? 0) === 0;
+    if (!targetIsEmptyDraft) {
+      summary.skipped.push({
+        payPeriodId: targetPeriod.id,
+        reason: `Target timecard is '${targetTimecard.status}'${(existingTargetEntries?.length ?? 0) > 0 ? " with existing entries" : ""}; left ${group.entries.length} entr${group.entries.length === 1 ? "y" : "ies"} in place`,
+      });
+      continue;
+    }
+
+    const sourceMetas = Array.from(group.sources.values());
+    const mergedStatus = sourceMetas.every((s) => s.status === "approved") ? "approved" : "submitted";
+    const submittedAts = sourceMetas.map((s) => s.submitted_at).filter((v): v is string => !!v);
+    const approvedAts = sourceMetas.map((s) => s.approved_at).filter((v): v is string => !!v);
+    const mergedSubmittedAt = submittedAts.length > 0 ? submittedAts.slice().sort()[0] : null;
+    const mergedApprovedAt =
+      mergedStatus === "approved" && approvedAts.length > 0
+        ? approvedAts.slice().sort().at(-1)!
+        : null;
+
+    const { error: statusError } = await supabase
+      .from("timecards")
+      .update({
+        status: mergedStatus,
+        submitted_at: mergedSubmittedAt,
+        approved_at: mergedApprovedAt,
+        rejection_note: null,
+      })
+      .eq("id", targetTimecard.id);
+
+    if (statusError) {
+      throw new Error(`Failed to update merged timecard ${targetTimecard.id}: ${statusError.message}`);
+    }
+    summary.timecardsUpdated += 1;
+
+    // The guard above already established this target has zero existing
+    // entries, so — unlike the draft reconciler — there's nothing to seed
+    // entry_order from; dates only collide against each other within this
+    // group's own entries (e.g. two old weekly timecards both having a
+    // Tuesday entry once merged into one monthly period).
+    const nextOrderByDate = new Map<string, number>();
+    for (const { sourceTimecardId, entry } of group.entries) {
+      const order = nextOrderByDate.get(entry.work_date) ?? 0;
+      nextOrderByDate.set(entry.work_date, order + 1);
+
+      const { error: updateError } = await supabase
+        .from("time_entries")
+        .update({ timecard_id: targetTimecard.id, entry_order: order })
+        .eq("id", entry.id);
+
+      if (updateError) {
+        throw new Error(`Failed to move entry ${entry.id}: ${updateError.message}`);
+      }
+
+      summary.entriesMoved += 1;
+      const bySource = movedBySource.get(sourceTimecardId) ?? new Map<string, number>();
+      bySource.set(targetTimecard.id, (bySource.get(targetTimecard.id) ?? 0) + 1);
+      movedBySource.set(sourceTimecardId, bySource);
+    }
+
+    summary.periodsTouched += 1;
+  }
+
+  for (const tc of sourceTimecards) {
+    const movedByTarget = movedBySource.get(tc.id);
+    const totalMoved = movedByTarget
+      ? Array.from(movedByTarget.values()).reduce((a, b) => a + b, 0)
+      : 0;
+    if (totalMoved !== tc.entries.length) continue;
+
+    let bestTarget: string | null = null;
+    let bestCount = -1;
+    for (const [targetId, count] of movedByTarget!.entries()) {
+      if (count > bestCount) {
+        bestTarget = targetId;
+        bestCount = count;
+      }
+    }
+    if (bestTarget) {
+      await supabase.from("notifications").update({ timecard_id: bestTarget }).eq("timecard_id", tc.id);
+    }
+
+    await supabase.from("timecards").delete().eq("id", tc.id);
+    summary.timecardsDeleted += 1;
+  }
+
+  return summary;
+}
